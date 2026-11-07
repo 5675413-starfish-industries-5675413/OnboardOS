@@ -98,4 +98,41 @@ describe("httpHandler", () => {
 
     vi.restoreAllMocks();
   });
+
+  // ── Phase 2A router-level regressions ────────────────────────────────────
+
+  it("GET /v1/me with no authorizer claims fails closed with 401 and never reaches DynamoDB", async () => {
+    // Simulates a mis-wired route (authorizer missing) or a direct invoke.
+    const result = await httpHandler(makeEvent("GET /v1/me"), makeContext("req-anon")) as HttpResult;
+    expect(result.statusCode).toBe(401);
+    const body = JSON.parse(result.body);
+    expect(body.code).toBe("UNAUTHORIZED");
+    expect(body.requestId).toBe("req-anon");
+  });
+
+  it("client-supplied role data in headers, query or body grants nothing on GET /v1/me", async () => {
+    const event = {
+      ...makeEvent("GET /v1/me"),
+      headers: { "x-role": "org_admin", "x-user-sub": "someone-else" },
+      queryStringParameters: { role: "org_admin", userSub: "someone-else" },
+      body: JSON.stringify({ role: "org_admin", organizationId: "other-org" }),
+    } as APIGatewayProxyEventV2;
+    const result = await httpHandler(event, makeContext()) as HttpResult;
+    expect(result.statusCode).toBe(401);
+    expect(result.body).not.toContain("org_admin");
+  });
+
+  it("routes only GET for /v1/me (other methods are 404, not an accidental alternate handler)", async () => {
+    for (const key of ["POST /v1/me", "PUT /v1/me", "DELETE /v1/me", "GET /v1/me/extra"]) {
+      const result = await httpHandler(makeEvent(key), makeContext()) as HttpResult;
+      expect(result.statusCode).toBe(404);
+    }
+  });
+
+  it("GET /health stays public: it returns 200 without any authorizer context", async () => {
+    const event = makeEvent("GET /health");
+    expect(JSON.stringify(event.requestContext)).not.toContain("authorizer");
+    const result = await httpHandler(event, makeContext()) as HttpResult;
+    expect(result.statusCode).toBe(200);
+  });
 });

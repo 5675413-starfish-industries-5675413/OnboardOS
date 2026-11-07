@@ -9,14 +9,21 @@
     "packages/*"
   ],
   "scripts": {
-    "typecheck": "tsc --build --noEmit",
+    "typecheck": "tsc --build",
+    "typecheck:scripts": "tsc -p scripts/tsconfig.json",
     "test": "vitest run",
-    "build": "sam build --template-file infrastructure/template.yaml",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "build": "sam build --template-file infrastructure/template.yaml --build-in-source",
+    "build:web": "npm --workspace=apps/web run build",
+    "verify": "npm run typecheck && npm run typecheck:scripts && npm run build:web && npm run test && npm run build"
   },
   "devDependencies": {
+    "@aws-sdk/client-cloudformation": "3.1164.0",
+    "@aws-sdk/client-cognito-identity-provider": "3.1164.0",
+    "@aws-sdk/client-dynamodb": "3.1164.0",
+    "@aws-sdk/lib-dynamodb": "3.1164.0",
     "@types/node": "24.19.2",
     "esbuild": "0.28.2",
+    "tsx": "4.19.4",
     "typescript": "5.8.3",
     "vitest": "5.1.0"
   },

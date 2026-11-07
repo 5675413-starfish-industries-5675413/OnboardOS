@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "types": ["node"],
+    "lib": ["ES2022"]
+  },
+  "include": ["*.ts", "lib/**/*.ts", "__tests__/**/*.ts"]
+}

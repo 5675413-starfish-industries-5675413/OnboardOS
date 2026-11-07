@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OnboardOS</title>
+    <!-- Inline minimal styles — no external CSS framework in Phase 2A -->
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: system-ui, -apple-system, sans-serif; background: #f8fafc; color: #1e293b; }
+      .container { max-width: 480px; margin: 80px auto; padding: 2rem; }
+      .card { background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+      h1 { font-size: 1.5rem; font-weight: 600; margin-bottom: .5rem; }
+      p { color: #64748b; line-height: 1.5; margin-bottom: 1rem; }
+      .btn { display: inline-block; background: #3b82f6; color: white; padding: .6rem 1.4rem; border-radius: 6px; border: none; cursor: pointer; font-size: .95rem; font-weight: 500; text-decoration: none; }
+      .btn:hover { background: #2563eb; }
+      .btn-sm { font-size: .85rem; padding: .4rem 1rem; background: #64748b; }
+      .btn-sm:hover { background: #475569; }
+      .badge { display: inline-block; padding: .2rem .7rem; border-radius: 9999px; font-size: .75rem; font-weight: 600; text-transform: uppercase; }
+      .badge-admin { background: #dbeafe; color: #1d4ed8; }
+      .badge-manager { background: #d1fae5; color: #065f46; }
+      .badge-employee { background: #fef3c7; color: #92400e; }
+      .error { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: .8rem 1rem; margin-bottom: 1rem; font-size: .9rem; }
+      .info { color: #1e40af; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; padding: .8rem 1rem; margin-bottom: 1rem; font-size: .9rem; }
+      .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: .6rem; }
+      .label { font-size: .8rem; color: #94a3b8; text-transform: uppercase; letter-spacing: .04em; }
+      .value { font-weight: 500; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
