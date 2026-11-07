@@ -2,10 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  OnboardOS — Infrastructure Phase 1.
-  HTTP API (GET /health), API Lambda, private smoke-test Lambda,
+  OnboardOS — Infrastructure Phase 1 + Phase 2A.
+  HTTP API (GET /health public; GET /v1/me JWT-protected), API Lambda,
+  private smoke-test Lambda, Cognito User Pool + SPA client, JWT authorizer,
   DynamoDB Core + Events tables with GSIs, CloudWatch logging.
-  No Cognito, Bedrock, S3, or scenario runner in this phase.
+  No Bedrock, S3, or scenario runner in this phase.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -15,8 +16,15 @@ Parameters:
     Type: Number
     Default: 7
     AllowedValues: [1, 3, 7, 14, 30]
+    Description: CloudWatch log retention in days.
+
+  DemoOrgId:
+    Type: String
+    Default: "northstar-cloud"
     Description: >
-      CloudWatch log retention in days. 7 days is appropriate for hackathon use.
+      Organization ID used for the Northstar Cloud demo. Seeded into DynamoDB
+      by the seed-demo script after deployment. Must match the value used
+      when seeding membership records.
 
 # ---------------------------------------------------------------------------
 # SAM Globals
@@ -36,29 +44,173 @@ Globals:
 # ---------------------------------------------------------------------------
 Resources:
 
+  # ── Cognito User Pool ─────────────────────────────────────────────────────
+  # Self-registration disabled: AdminCreateUser only.
+  # Demo accounts created exclusively via the seed-demo script.
+
+  OnboardOSUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${AWS::StackName}-users"
+      # Feature plan. Managed login (the sign-in page this stack uses) is NOT
+      # available on the LITE plan, and Cognito's documented default is ESSENTIALS.
+      # Stated explicitly so the requirement is visible and cannot silently regress.
+      # Essentials is a priced plan: check the Amazon Cognito pricing page.
+      UserPoolTier: ESSENTIALS
+      # Self-registration disabled — all accounts created by admin (seed script)
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      # Require email as the primary sign-in attribute
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      # Enforce a minimum password policy (no production hardening needed here)
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          TemporaryPasswordValidityDays: 7
+      # Standard attributes used by auth.ts for display name
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+        - Name: preferred_username
+          AttributeDataType: String
+          Mutable: true
+          Required: false
+
+  # ── Cognito SPA App Client ────────────────────────────────────────────────
+  # Public client (no client secret) using authorization-code + PKCE.
+  # Self-registration disabled; no implicit grant.
+
+  OnboardOSSpaClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${AWS::StackName}-spa"
+      UserPoolId: !Ref OnboardOSUserPool
+      # No client secret — SPA is a public client
+      GenerateSecret: false
+      # OAuth flows: authorization code with PKCE only
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      # Callback and logout URLs for local development
+      # Add the hosted frontend URL here after Phase 3 hosting is set up
+      CallbackURLs:
+        - "http://localhost:5173/callback"
+      LogoutURLs:
+        - "http://localhost:5173"
+      # Supported identity providers: Cognito only (no external IdPs in Phase 2A)
+      SupportedIdentityProviders:
+        - COGNITO
+      # Token validity configuration
+      AccessTokenValidity: 60       # minutes
+      IdTokenValidity: 60           # minutes
+      RefreshTokenValidity: 30      # days
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      # Sign-in happens only through the Hosted login pages (authorization-code +
+      # PKCE). On managed login the sign-in methods offered "depend on the
+      # configuration of your user pool and your app client" (AWS docs: Configure
+      # authentication methods for managed login); ALLOW_USER_AUTH is the
+      # documented flow that enables choice-based sign-in, including password.
+      # ALLOW_USER_PASSWORD_AUTH is deliberately NOT enabled (plaintext password
+      # over the API), nor custom/admin flows. Refresh is kept for token refresh.
+      ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+
+  # ── Cognito Hosted UI Domain ──────────────────────────────────────────────
+  # Required to use Cognito Hosted UI for login redirect.
+  # Cognito domain prefixes are unique per AWS Region across ALL accounts, so a
+  # bare stack name (e.g. "onboardos-dev") is likely already taken. The prefix is
+  # "<stack-name>-<first 8 hex chars of the stack UUID>": unique in practice,
+  # stable across stack updates (StackId never changes), and does not embed the
+  # AWS account ID. Constraints: the stack name must be lowercase and <= 54 chars
+  # (Cognito prefixes are lowercase, max 63 chars).
+
+  OnboardOSUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      # Managed login (version 2). Version 1 is the classic hosted UI. A domain uses
+      # one or the other. NOTE (AWS docs): setting 2 does NOT by itself activate any
+      # login pages; a branding style must also exist (OnboardOSManagedLoginBranding).
+      ManagedLoginVersion: 2
+      Domain: !Join
+        - "-"
+        - - !Ref AWS::StackName
+          - !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]
+      UserPoolId: !Ref OnboardOSUserPool
+
+  # ── Cognito managed login branding style ──────────────────────────────────
+  # REQUIRED for a usable sign-in page. AWS docs (CreateUserPoolClient /
+  # CreateUserPoolDomain): app clients created through the API (which
+  # CloudFormation uses) get NO branding style automatically, and "managed login
+  # and classic hosted UI pages aren't available for your client until after you
+  # apply a branding style". Console-created clients get one; these do not.
+  # UseCognitoProvidedValues applies Cognito's default style; per the docs,
+  # Settings and Assets MUST then be omitted. The style is linked to this client.
+  # DependsOn orders it after the domain (the Refs below only depend on the pool
+  # and client). CloudFormation deletes in reverse order, so the style goes first.
+
+  OnboardOSManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DependsOn: OnboardOSUserPoolDomain
+    Properties:
+      UserPoolId: !Ref OnboardOSUserPool
+      ClientId: !Ref OnboardOSSpaClient
+      UseCognitoProvidedValues: true
+
   # ── HTTP API ──────────────────────────────────────────────────────────────
+  # JWT authorizer applied to protected routes only.
+  # GET /health remains public (no authorizer).
 
   OnboardOSHttpApi:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: "$default"
-      Description: OnboardOS HTTP API — Phase 1 (public GET /health only)
+      Description: OnboardOS HTTP API - Phase 2A
+      Auth:
+        # Default authorizer for all routes that declare Auth: JwtAuthorizer
+        Authorizers:
+          JwtAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${OnboardOSUserPool}"
+              audience:
+                - !Ref OnboardOSSpaClient
+        # No default authorizer — each protected route declares it explicitly
+        # so GET /health stays unauthenticated.
       CorsConfiguration:
         AllowOrigins:
           - "http://localhost:5173"
         AllowMethods:
           - GET
+          - OPTIONS
         AllowHeaders:
           - Content-Type
+          - Authorization
         MaxAge: 300
 
   # ── API Lambda ────────────────────────────────────────────────────────────
-  # Handles public GET /health. No DynamoDB permissions in Phase 1.
 
   OnboardOSApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: OnboardOS API — HTTP routing handler (Phase 1)
+      Description: OnboardOS API - HTTP routing handler (Phase 2A)
       Handler: handler.httpHandler
       CodeUri: ../services/api/
       Role: !GetAtt OnboardOSApiRole.Arn
@@ -66,13 +218,24 @@ Resources:
         Variables:
           ONBOARDOS_CORE_TABLE: !Ref OnboardOSCoreTable
           ONBOARDOS_EVENTS_TABLE: !Ref OnboardOSEventsTable
+          ONBOARDOS_ORG_ID: !Ref DemoOrgId
       Events:
+        # Public route — no authorizer
         ApiHealth:
           Type: HttpApi
           Properties:
             ApiId: !Ref OnboardOSHttpApi
             Path: /health
             Method: GET
+        # Protected route — JWT authorizer required
+        ApiGetMe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/me
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -82,15 +245,9 @@ Resources:
         Sourcemap: false
         Target: es2022
         Format: cjs
-        # Bundle all dependencies — do not externalise @aws-sdk/* here because
-        # the API function does not use the SDK in Phase 1; the bundle will be
-        # very small. When DynamoDB access is added in a later phase, evaluate
-        # externalising SDK packages if the Node 24 runtime bundles them.
 
   # ── Smoke-test Lambda ─────────────────────────────────────────────────────
-  # INTERNAL ONLY — no API Gateway event source.
-  # Invocable only via `aws lambda invoke` with IAM authorisation.
-  # Performs a real DynamoDB write → read (ConsistentRead) → delete round-trip.
+  # INTERNAL ONLY - no API Gateway event source. Unchanged from Phase 1.
 
   OnboardOSSmokeFunction:
     Type: AWS::Serverless::Function
@@ -104,7 +261,6 @@ Resources:
       Environment:
         Variables:
           ONBOARDOS_CORE_TABLE: !Ref OnboardOSCoreTable
-      # No Events property — this function has no public trigger.
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -114,17 +270,16 @@ Resources:
         Sourcemap: false
         Target: es2022
         Format: cjs
-        # Bundle @aws-sdk packages so the smoke function is self-contained and
-        # does not depend on the runtime-provided SDK version.
         External: []
 
   # ── IAM: API execution role ───────────────────────────────────────────────
-  # Phase 1: CloudWatch Logs only. No DynamoDB permissions yet.
+  # Phase 2A adds DynamoDB GetItem on the Core table for membership lookups.
+  # No write, no scan, no Events table access.
 
   OnboardOSApiRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Execution role for OnboardOS API Lambda (Phase 1 - logs only)
+      Description: Execution role for OnboardOS API Lambda (Phase 2A)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -145,10 +300,21 @@ Resources:
                   - logs:PutLogEvents
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:*"
+        - PolicyName: OnboardOSApiDynamoDB
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowMembershipRead
+                Effect: Allow
+                Action:
+                  # GetItem: load specific membership and org profile records
+                  - dynamodb:GetItem
+                Resource:
+                  - !GetAtt OnboardOSCoreTable.Arn
+                  # No index access — membership lookup uses primary key directly
 
   # ── IAM: Smoke-test execution role ────────────────────────────────────────
-  # Narrowly scoped: CloudWatch Logs + DynamoDB on Core table only.
-  # No Events table access, no index access, no broad write operations.
+  # Unchanged from Phase 1.
 
   OnboardOSSmokeRole:
     Type: AWS::IAM::Role
@@ -187,14 +353,9 @@ Resources:
                   - dynamodb:DeleteItem
                 Resource:
                   - !GetAtt OnboardOSCoreTable.Arn
-                  # No GSI sub-resources — smoke test uses PK/SK primary key only
 
   # ── DynamoDB: Core table ──────────────────────────────────────────────────
-  # Stores current state, memberships, assignments, sessions, config revisions,
-  # test runs, submissions, and review records.
-  # GSI1: employee assignments lookup
-  # GSI2: manager review queue
-  # Table name is stack-scoped to prevent collision on shared workshop accounts.
+  # Unchanged from Phase 1 — GSI1 and GSI2 preserved.
 
   OnboardOSCoreTable:
     Type: AWS::DynamoDB::Table
@@ -222,9 +383,6 @@ Resources:
         - AttributeName: SK
           KeyType: RANGE
       GlobalSecondaryIndexes:
-        # GSI1: employee assignment list
-        # GSI1PK = ORG#<orgId>#EMP#<userSub>
-        # GSI1SK = ASSIGN#<createdAt>#<id>
         - IndexName: GSI1
           KeySchema:
             - AttributeName: GSI1PK
@@ -233,9 +391,6 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-        # GSI2: manager review queue
-        # GSI2PK = ORG#<orgId>#MANAGER#<userSub>
-        # GSI2SK = REVIEWABLE#<status>#<submittedAt>#<id>
         - IndexName: GSI2
           KeySchema:
             - AttributeName: GSI2PK
@@ -244,12 +399,9 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
-      # PITR is not enabled — optional paid feature, not required for Phase 1.
-      # Enable before production use.
 
   # ── DynamoDB: Events table ────────────────────────────────────────────────
-  # Append-only session event history.
-  # PK = SESSION#<sessionId>, SK = SEQ#<zeroPaddedSequence>
+  # Unchanged from Phase 1.
 
   OnboardOSEventsTable:
     Type: AWS::DynamoDB::Table
@@ -270,7 +422,6 @@ Resources:
           KeyType: RANGE
 
   # ── CloudWatch log groups ─────────────────────────────────────────────────
-  # Explicit log groups ensure retention is set before the first invocation.
 
   OnboardOSApiLogGroup:
     Type: AWS::Logs::LogGroup
@@ -289,7 +440,7 @@ Resources:
 # ---------------------------------------------------------------------------
 Outputs:
   ApiUrl:
-    Description: Public API base URL (phase 1 exposes GET /health only)
+    Description: Public API base URL
     Value: !Sub "https://${OnboardOSHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
 
   ApiFunctionName:
@@ -297,7 +448,7 @@ Outputs:
     Value: !Ref OnboardOSApiFunction
 
   SmokeFunctionName:
-    Description: Smoke-test Lambda function name (internal — IAM auth only)
+    Description: Smoke-test Lambda function name (internal - IAM auth only)
     Value: !Ref OnboardOSSmokeFunction
 
   CoreTableName:
@@ -307,3 +458,23 @@ Outputs:
   EventsTableName:
     Description: DynamoDB Events table name
     Value: !Ref OnboardOSEventsTable
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref OnboardOSUserPool
+
+  UserPoolClientId:
+    Description: Cognito SPA App Client ID (public - safe to embed in frontend)
+    Value: !Ref OnboardOSSpaClient
+
+  CognitoHostedUiDomain:
+    Description: Full Cognito Hosted UI host name (use as VITE_COGNITO_DOMAIN)
+    Value: !Sub "${OnboardOSUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com"
+
+  DemoOrgId:
+    Description: Organization ID the API Lambda is configured for (seed script must match)
+    Value: !Ref DemoOrgId
+
+  CognitoIssuerUrl:
+    Description: JWT issuer URL for the API Gateway authorizer
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${OnboardOSUserPool}"

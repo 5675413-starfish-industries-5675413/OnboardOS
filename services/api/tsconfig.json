@@ -4,7 +4,13 @@
     "outDir": "dist",
     "rootDir": "src",
     "composite": true,
-    "tsBuildInfoFile": "dist/.tsbuildinfo"
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "paths": {
+      "@onboardos/contracts": ["../../packages/contracts/src/index.ts"]
+    }
   },
+  "references": [
+    { "path": "../../packages/contracts" }
+  ],
   "include": ["src/**/*"]
 }
