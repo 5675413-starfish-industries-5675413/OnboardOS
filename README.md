@@ -33,6 +33,7 @@ This pack reorganizes the earlier JobOS architecture and renames it OnboardOS. I
 13. [Demo script](docs/12-demo-script.md)
 14. [Coding-agent rules](CLAUDE.md)
 15. [First coding-agent session prompt](docs/13-first-coding-session-prompt.md)
+16. [Landing page design brief](docs/16-landing-page-design-brief.md)
 
 ## Important constraints
 
