@@ -1,0 +1,16 @@
+node_modules/
+dist/
+build/
+coverage/
+.aws-sam/
+.env
+.env.*
+!.env.example
+.DS_Store
+.vercel/
+*.pem
+*.key
+*.log
+*.tsbuildinfo
+*.mp4
+*.webm
