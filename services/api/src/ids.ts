@@ -34,3 +34,13 @@ export function assignmentIdFor(
 export function sessionIdFor(assignmentId: string, attempt = 1): string {
   return `ses_${digest(`${assignmentId}|attempt|${attempt}`)}`;
 }
+
+/**
+ * One deterministic id per (session, run number). The 4-digit number keeps
+ * ids sortable in creation order; the hash suffix makes them unguessable-ish
+ * and keeps two concurrent requests for the same slot colliding on the SAME id
+ * (so the conditional write, not a duplicate, decides the winner).
+ */
+export function testRunIdFor(sessionId: string, runNumber: number): string {
+  return `run_${String(runNumber).padStart(4, "0")}_${digest(`${sessionId}|testrun|${runNumber}`).slice(0, 12)}`;
+}

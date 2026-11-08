@@ -185,15 +185,36 @@ export async function transactStartSession(
   );
 }
 
+/** An additional conditional Put on the Core table that must commit atomically with an action. */
+export interface CorePut {
+  item: Item;
+  condition: string;
+  names?: Record<string, string>;
+  values?: Record<string, unknown>;
+}
+
 /**
- * Apply one reducer result: replace the session state and append its event
+ * Apply one reducer result: replace the session state and append its event(s)
  * atomically, ONLY if the stored version is still the one the action was based
- * on and the caller still owns the session. A concurrent writer therefore makes
- * this transaction cancel (=> 409) instead of silently overwriting.
+ * on. A concurrent writer therefore makes this transaction cancel (=> 409)
+ * instead of silently overwriting.
+ *
+ *  - `employeeSub` set: the caller must still own the session (client actions).
+ *    Omitted only for system-recorded results, whose authority is the engine's
+ *    SYSTEM_ACTOR check plus the conditions on `extraCorePuts`.
+ *  - `extraCorePuts`: a ConfigRevision (create-if-absent), a PENDING TestRun
+ *    (create-if-absent) or a terminal TestRun (only if still PENDING) written in
+ *    the SAME transaction, so item and state can never disagree.
  */
 export async function transactApplyAction(
   db: Db,
-  p: { nextSessionItem: Item; eventItems: Item[]; expectedVersion: number; employeeSub: string },
+  p: {
+    nextSessionItem: Item;
+    eventItems: Item[];
+    expectedVersion: number;
+    employeeSub?: string;
+    extraCorePuts?: CorePut[];
+  },
 ): Promise<void> {
   await db.client.send(
     new TransactWriteCommand({
@@ -202,10 +223,25 @@ export async function transactApplyAction(
           Put: {
             TableName: db.coreTable,
             Item: p.nextSessionItem,
-            ConditionExpression: "stateVersion = :expected AND employeeSub = :employeeSub",
-            ExpressionAttributeValues: { ":expected": p.expectedVersion, ":employeeSub": p.employeeSub },
+            ConditionExpression:
+              p.employeeSub === undefined
+                ? "stateVersion = :expected"
+                : "stateVersion = :expected AND employeeSub = :employeeSub",
+            ExpressionAttributeValues:
+              p.employeeSub === undefined
+                ? { ":expected": p.expectedVersion }
+                : { ":expected": p.expectedVersion, ":employeeSub": p.employeeSub },
           },
         },
+        ...(p.extraCorePuts ?? []).map((x) => ({
+          Put: {
+            TableName: db.coreTable,
+            Item: x.item,
+            ConditionExpression: x.condition,
+            ...(x.names ? { ExpressionAttributeNames: x.names } : {}),
+            ...(x.values ? { ExpressionAttributeValues: x.values } : {}),
+          },
+        })),
         ...p.eventItems.map((e) => ({
           Put: {
             TableName: db.eventsTable,
@@ -216,4 +252,57 @@ export async function transactApplyAction(
       ],
     }),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Config revisions and test runs (same partition as the session)
+// ---------------------------------------------------------------------------
+
+/** Create-if-absent condition for a brand-new immutable item. */
+export const CREATE_ONLY = "attribute_not_exists(PK)";
+/** A PENDING run may be completed exactly once. */
+export const ONLY_IF_PENDING: Pick<CorePut, "condition" | "names" | "values"> = {
+  condition: "#status = :pending",
+  names: { "#status": "status" },
+  values: { ":pending": "PENDING" },
+};
+
+const MAX_REVISIONS_READ = 30;
+const MAX_RUNS_READ = 20;
+
+/** Saved revisions, newest first. Bounded by the engine's caps; single-partition consistent Query. */
+export async function queryConfigRevisions(db: Db, sessionId: string): Promise<Item[]> {
+  const r = await db.client.send(
+    new QueryCommand({
+      TableName: db.coreTable,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+      ExpressionAttributeValues: { ":pk": `SESSION#${sessionId}`, ":prefix": "CONFIG#" },
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: MAX_REVISIONS_READ,
+    }),
+  );
+  return r.Items ?? [];
+}
+
+/** Test runs, newest first. */
+export async function queryTestRuns(db: Db, sessionId: string): Promise<Item[]> {
+  const r = await db.client.send(
+    new QueryCommand({
+      TableName: db.coreTable,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+      ExpressionAttributeValues: { ":pk": `SESSION#${sessionId}`, ":prefix": "TEST#" },
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: MAX_RUNS_READ,
+    }),
+  );
+  return r.Items ?? [];
+}
+
+export async function getTestRunItem(db: Db, sessionId: string, testRunId: string): Promise<Item | undefined> {
+  const r = await db.client.send(
+    new GetCommand({ TableName: db.coreTable, Key: keys.testRun(sessionId, testRunId), ConsistentRead: true }),
+  );
+  return r.Item;
 }

@@ -16,6 +16,8 @@
  *    defense in depth, so the engine can be tested without an API.)
  */
 
+import { configHash, validateConfig } from "./config.js";
+import { SYSTEM_ACTOR } from "./types.js";
 import type {
   DomainEvent,
   PublishedScenario,
@@ -32,6 +34,10 @@ import type {
  * client from generating unbounded writes by repeating a valid action.
  */
 export const MAX_STATE_VERSION = 200;
+
+/** Bounded history: at most this many test runs / saved revisions per session. */
+export const MAX_TEST_RUNS = 20;
+export const MAX_CONFIG_REVISIONS = 30;
 
 function reject(code: Rejection["code"], message: string, currentVersion?: number): TransitionResult {
   return {
@@ -60,6 +66,10 @@ export function createSession(
     stateVersion: 0,
     // Copy: the definition is shared and must never be aliased by session state.
     config: { ...definition.content.initialConfig },
+    configRevision: 0,
+    configHash: configHash(definition.content.initialConfig),
+    testRunsRequested: 0,
+    activeTestRunId: null,
     viewed: { ticket: false, runbook: false, diagnostics: false },
     startedAt: null,
     updatedAt: now,
@@ -80,9 +90,21 @@ export function reduceScenario(
     return reject("SCENARIO_MISMATCH", "Session is bound to a different scenario version");
   }
 
-  // 2. Ownership, before anything that could reveal state to a non-owner.
-  if (ctx.actorSub !== state.employeeSub) {
-    return reject("NOT_OWNER", "Only the assigned employee can act on this session");
+  // 2. Authority, before anything that could reveal state to a non-owner.
+  //    System actions need the system identity; client actions need the owner
+  //    and can never be performed by the system identity.
+  const isSystemAction = action.type === "RECORD_TEST_RESULT";
+  if (isSystemAction) {
+    if (ctx.actorSub !== SYSTEM_ACTOR) {
+      return reject("NOT_AUTHORIZED", "Only the system can record test results");
+    }
+  } else {
+    if (ctx.actorSub === SYSTEM_ACTOR) {
+      return reject("NOT_AUTHORIZED", "The system identity cannot perform employee actions");
+    }
+    if (ctx.actorSub !== state.employeeSub) {
+      return reject("NOT_OWNER", "Only the assigned employee can act on this session");
+    }
   }
 
   // 3. Optimistic concurrency.
@@ -94,8 +116,9 @@ export function reduceScenario(
     );
   }
 
-  // 4. Bounded growth.
-  if (state.stateVersion >= MAX_STATE_VERSION) {
+  // 4. Bounded growth. Recording a result is exempt: a requested run must
+  //    always be completable, and completions are bounded by MAX_TEST_RUNS.
+  if (!isSystemAction && state.stateVersion >= MAX_STATE_VERSION) {
     return reject("LIMIT_REACHED", "This session has reached its maximum number of actions");
   }
 
@@ -157,6 +180,81 @@ export function reduceScenario(
           stateVersion: nextVersion,
           updatedAt: ctx.now,
         },
+        events: [event],
+      };
+    }
+
+    case "SAVE_CONFIG": {
+      if (state.phase !== "INVESTIGATING") {
+        return reject("INVALID_TRANSITION", "Start the investigation before editing configuration");
+      }
+      const checked = validateConfig(action.config);
+      if (!checked.ok) return reject(checked.code, checked.message);
+      const hash = configHash(checked.config);
+      if (hash === state.configHash) {
+        return reject("CONFIG_UNCHANGED", "That configuration is already the current revision");
+      }
+      if (state.configRevision >= MAX_CONFIG_REVISIONS) {
+        return reject("REVISION_LIMIT_REACHED", "This session has reached its maximum number of saved revisions");
+      }
+      const revision = state.configRevision + 1;
+      const event: DomainEvent = {
+        ...base,
+        type: "CONFIG_SAVED",
+        payload: { revision, configHash: hash, request_timeout_ms: checked.config.request_timeout_ms },
+      };
+      return {
+        ok: true,
+        nextState: {
+          ...state,
+          config: { ...checked.config },
+          configRevision: revision,
+          configHash: hash,
+          stateVersion: nextVersion,
+          updatedAt: ctx.now,
+        },
+        events: [event],
+      };
+    }
+
+    case "REQUEST_TEST_RUN": {
+      if (state.phase !== "INVESTIGATING") {
+        return reject("INVALID_TRANSITION", "Start the investigation before running tests");
+      }
+      if (state.activeTestRunId !== null) {
+        return reject("RUN_IN_PROGRESS", "A test run is already in progress");
+      }
+      if (state.testRunsRequested >= MAX_TEST_RUNS) {
+        return reject("RUN_LIMIT_REACHED", "This session has reached its maximum number of test runs");
+      }
+      const event: DomainEvent = {
+        ...base,
+        type: "TEST_RUN_REQUESTED",
+        payload: { testRunId: action.testRunId, configRevision: state.configRevision, configHash: state.configHash },
+      };
+      return {
+        ok: true,
+        nextState: {
+          ...state,
+          testRunsRequested: state.testRunsRequested + 1,
+          activeTestRunId: action.testRunId,
+          stateVersion: nextVersion,
+          updatedAt: ctx.now,
+        },
+        events: [event],
+      };
+    }
+
+    case "RECORD_TEST_RESULT": {
+      if (state.activeTestRunId === null || state.activeTestRunId !== action.testRunId) {
+        return reject("INVALID_TRANSITION", "That test run is not awaiting a result");
+      }
+      const payload: Record<string, string> = { testRunId: action.testRunId, outcome: action.outcome };
+      if (action.errorCode !== undefined) payload.errorCode = action.errorCode;
+      const event: DomainEvent = { ...base, type: "TEST_RUN_COMPLETED", payload };
+      return {
+        ok: true,
+        nextState: { ...state, activeTestRunId: null, stateVersion: nextVersion, updatedAt: ctx.now },
         events: [event],
       };
     }

@@ -20,15 +20,16 @@ import {
 import {
   reduceScenario,
   startSession,
-  type Rejection,
   type WorkplaceAction,
   type WorkplaceState,
 } from "@onboardos/scenario-engine";
 import { getPublishedScenario } from "@onboardos/scenario-fixtures";
 import { authenticate, loadActiveMembership, NOT_FOUND } from "../authz.js";
 import type { ApiDeps } from "../deps.js";
+import { loadHistory } from "../history.js";
 import { HttpError, json, parseBody, pathParam, type HttpResult } from "../http.js";
 import { ASSIGNMENT_ID_PATTERN, SESSION_ID_PATTERN, sessionIdFor } from "../ids.js";
+import { rejectionToError } from "./rejections.js";
 import {
   eventItem,
   parseAssignment,
@@ -45,17 +46,17 @@ import {
   transactStartSession,
 } from "../repo.js";
 
-const INTERNAL = (what: string): Error => new Error(what);
+export const INTERNAL = (what: string): Error => new Error(what);
 
 /** The published scenario a stored record is frozen to. Missing => server fault, never a guess. */
-function scenarioFor(scenarioId: string, version: number) {
+export function scenarioFor(scenarioId: string, version: number) {
   const scenario = getPublishedScenario(scenarioId, version);
   if (!scenario) throw INTERNAL(`published scenario ${scenarioId}@${version} is not available`);
   return scenario;
 }
 
 /** Load a session the caller owns and may still use, or throw an opaque 404. */
-async function loadOwnedSession(
+export async function loadOwnedSession(
   deps: ApiDeps,
   event: APIGatewayProxyEventV2,
 ): Promise<{ state: WorkplaceState; sub: string }> {
@@ -109,7 +110,8 @@ export async function handleStartAssignment(
   // Already started: this is a retry/resume. Return the existing authoritative session.
   if (assignment.status === "IN_PROGRESS") {
     const state = await loadExistingSession(deps, assignment);
-    return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario), created: false }));
+    const history = await loadHistory(deps.db, state.sessionId);
+    return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
   }
   if (assignment.status !== "ASSIGNED") {
     throw new HttpError(409, "INVALID_ASSIGNMENT_STATE", "This assignment can no longer be started");
@@ -141,7 +143,8 @@ export async function handleStartAssignment(
     const latest = parseAssignment(await getAssignmentItem(deps.db, assignmentId));
     if (latest && latest.status === "IN_PROGRESS" && latest.employeeSub === sub) {
       const state = await loadExistingSession(deps, latest);
-      return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario), created: false }));
+      const history = await loadHistory(deps.db, state.sessionId);
+      return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
     }
     throw new HttpError(409, "CONFLICT", "The assignment could not be started");
   }
@@ -155,18 +158,9 @@ export async function handleGetSession(
 ): Promise<HttpResult> {
   const { state } = await loadOwnedSession(deps, event);
   const scenario = scenarioFor(state.scenarioId, state.scenarioVersion);
-  return json(200, GetSessionResponseSchema.parse({ session: toSessionView(state, scenario) }));
+  const history = await loadHistory(deps.db, state.sessionId);
+  return json(200, GetSessionResponseSchema.parse({ session: toSessionView(state, scenario, history) }));
 }
-
-const REJECTION_STATUS: Record<Rejection["code"], { status: number; code: string }> = {
-  VERSION_CONFLICT: { status: 409, code: "VERSION_CONFLICT" },
-  INVALID_TRANSITION: { status: 422, code: "INVALID_TRANSITION" },
-  UNKNOWN_OBJECT: { status: 422, code: "UNKNOWN_OBJECT" },
-  LIMIT_REACHED: { status: 429, code: "LIMIT_REACHED" },
-  // The API authorizes ownership first, so these indicate a bug or tampering: do not explain.
-  NOT_OWNER: { status: 404, code: "NOT_FOUND" },
-  SCENARIO_MISMATCH: { status: 500, code: "INTERNAL_ERROR" },
-};
 
 export async function handleSessionAction(
   event: APIGatewayProxyEventV2,
@@ -181,11 +175,7 @@ export async function handleSessionAction(
   const action: WorkplaceAction = { ...body.action, expectedVersion: body.expectedStateVersion };
   const result = reduceScenario(scenario, state, action, { now: deps.now(), actorSub: sub });
 
-  if (!result.ok) {
-    const mapped = REJECTION_STATUS[result.error.code];
-    if (mapped.status >= 500) throw INTERNAL(`engine rejection ${result.error.code}`);
-    throw new HttpError(mapped.status, mapped.code, result.error.message);
-  }
+  if (!result.ok) throw rejectionToError(result.error);
 
   try {
     await transactApplyAction(deps.db, {
@@ -204,5 +194,6 @@ export async function handleSessionAction(
     throw err;
   }
 
-  return json(200, SessionActionResponseSchema.parse({ session: toSessionView(result.nextState, scenario) }));
+  const history = await loadHistory(deps.db, state.sessionId);
+  return json(200, SessionActionResponseSchema.parse({ session: toSessionView(result.nextState, scenario, history) }));
 }

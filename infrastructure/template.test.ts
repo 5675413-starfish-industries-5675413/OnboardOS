@@ -102,6 +102,9 @@ describe("API routes and authorization", () => {
     "POST /v1/assignments/{assignmentId}/start",
     "GET /v1/sessions/{sessionId}",
     "POST /v1/sessions/{sessionId}/actions",
+    "PUT /v1/sessions/{sessionId}/config",
+    "POST /v1/sessions/{sessionId}/test-runs",
+    "GET /v1/sessions/{sessionId}/test-runs/{runId}",
   ];
 
   it("declares exactly the intended routes: nothing extra can be added silently", () => {
@@ -120,8 +123,9 @@ describe("API routes and authorization", () => {
     }
   });
 
-  it("only uses methods the API implements (no PUT/PATCH/DELETE routes)", () => {
-    for (const r of apiRoutes()) expect(["GET", "POST"]).toContain(r.method);
+  it("only uses methods the API implements (GET, POST and the one PUT; no PATCH/DELETE routes)", () => {
+    for (const r of apiRoutes()) expect(["GET", "POST", "PUT"]).toContain(r.method);
+    expect(apiRoutes().filter((r) => r.method === "PUT").map((r) => r.path)).toEqual(["/v1/sessions/{sessionId}/config"]);
   });
 
   it("validates tokens against this user pool and this SPA client", () => {
@@ -139,7 +143,7 @@ describe("API routes and authorization", () => {
   });
 
   it("allows only the HTTP methods the API implements for cross-origin calls", () => {
-    expect([...listUnder(resource("OnboardOSHttpApi"), "AllowMethods")].sort()).toEqual(["GET", "OPTIONS", "POST"]);
+    expect([...listUnder(resource("OnboardOSHttpApi"), "AllowMethods")].sort()).toEqual(["GET", "OPTIONS", "POST", "PUT"]);
   });
 });
 
@@ -158,8 +162,63 @@ describe("private smoke-test function (Phase 1) is unchanged", () => {
   });
 });
 
+describe("scenario runner function (Phase 2C) is private and has no data access", () => {
+  const fn = resource("OnboardOSScenarioRunner");
+  const role = resource("OnboardOSRunnerRole");
+
+  it("has no event source of any kind: no HTTP route, no function URL, no trigger", () => {
+    expect(fn).not.toMatch(/^\s+Events:/m);
+    expect(fn).not.toMatch(/FunctionUrl|HttpApi|Api:|Schedule|SQS|SNS|S3|Kinesis|DynamoDB:/);
+    expect(TEXT).not.toContain("AWS::Lambda::Url");
+    expect(TEXT).not.toContain("AWS::Lambda::Permission"); // nothing outside IAM can invoke it
+  });
+
+  it("uses its own handler, code and dedicated role (never the API's or the smoke role)", () => {
+    expect(fn).toContain("Handler: handler.runnerHandler");
+    expect(fn).toContain("CodeUri: ../services/test-runner/");
+    expect(fn).toContain("Role: !GetAtt OnboardOSRunnerRole.Arn");
+    expect(fn).not.toContain("OnboardOSApiRole");
+    expect(fn).not.toContain("OnboardOSSmokeRole");
+  });
+
+  it("bundles only its own entry point", () => {
+    expect(fn).toMatch(/EntryPoints:\s*\n\s*-\s*src\/handler\.ts/);
+  });
+
+  it("has no environment variables at all (no table names, no secrets, nothing to read)", () => {
+    expect(fn).not.toContain("Environment:");
+    expect(fn).not.toMatch(/ONBOARDOS_/);
+  });
+
+  it("has a bounded runtime", () => {
+    expect(fn).toMatch(/Timeout:\s*10\b/);
+    expect(fn).toMatch(/MemorySize:\s*256\b/);
+  });
+
+  it("its role can ONLY write logs: no DynamoDB, no Lambda, no S3, no secrets, no Bedrock", () => {
+    const actions = [...role.matchAll(/^\s+- ([a-z0-9-]+:[A-Za-z*]+)\s*$/gm)].map((m) => m[1]);
+    expect([...actions].sort()).toEqual(["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]);
+    for (const forbidden of ["dynamodb", "lambda:", "s3:", "secretsmanager", "ssm:", "bedrock", "kms:", "sts:AssumeRole\n          - "]) {
+      expect(role.replace("Action: sts:AssumeRole", ""), forbidden).not.toContain(forbidden);
+    }
+    expect(role).not.toContain("OnboardOSCoreTable");
+    expect(role).not.toContain("OnboardOSEventsTable");
+  });
+
+  it("only the API function is told the runner's name, and it has a retained log group", () => {
+    expect(resource("OnboardOSApiFunction")).toContain("ONBOARDOS_RUNNER_FUNCTION_NAME: !Ref OnboardOSScenarioRunner");
+    expect(resource("OnboardOSSmokeFunction")).not.toContain("RUNNER");
+    expect(resource("OnboardOSRunnerLogGroup")).toMatch(/RetentionInDays:\s*!Ref LogRetentionDays/);
+  });
+
+  it("is not exposed through any output", () => {
+    const outputs = TEXT.slice(TEXT.indexOf("\nOutputs:"));
+    expect(outputs).not.toMatch(/Runner/);
+  });
+});
+
 describe("IAM least privilege", () => {
-  describe("API role (Phase 2B): exactly what the implemented routes use", () => {
+  describe("API role (Phase 2C): exactly what the implemented routes use", () => {
     const role = "OnboardOSApiRole";
     const stmts = () => statements(role);
     const byId = (sid: string) => {
@@ -194,11 +253,24 @@ describe("IAM least privilege", () => {
 
     it("has no other DynamoDB statement, and the complete action set is exactly the four used", () => {
       expect(stmts().map((x) => x.sid).filter((sid) => !/Logging|Logs/i.test(sid)).sort())
-        .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend"]);
+        .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend", "InvokeScenarioRunner"]);
       const all = [...resource(role).matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
       expect([...new Set(all)].sort()).toEqual([
         "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem",
       ]);
+    });
+
+    it("may invoke exactly one Lambda, the scenario runner, by ARN: no wildcard, no other lambda action", () => {
+      const st = byId("InvokeScenarioRunner");
+      expect(st.actions).toEqual(["lambda:InvokeFunction"]);
+      const listed: string[] = [];
+      for (const line of st.resources.split("\n").slice(1)) {
+        if (!line.trim().startsWith("- ") || /^\s*- (PolicyName|Sid):/.test(line)) break;
+        listed.push(line.trim().slice(2));
+      }
+      expect(listed).toEqual(["!GetAtt OnboardOSScenarioRunner.Arn"]);
+      const lambdaActions = [...resource(role).matchAll(/lambda:[A-Za-z*]+/g)].map((m) => m[0]);
+      expect([...new Set(lambdaActions)]).toEqual(["lambda:InvokeFunction"]);
     });
 
     it("never grants Scan, Delete, Batch, ConditionCheck, table administration or Events reads", () => {
@@ -228,8 +300,8 @@ describe("IAM least privilege", () => {
     expect(TEXT).not.toMatch(/\biam:[A-Za-z*]+/);
   });
 
-  it("does not make either Lambda role assumable by anything but Lambda", () => {
-    for (const name of ["OnboardOSApiRole", "OnboardOSSmokeRole"]) {
+  it("does not make any Lambda role assumable by anything but Lambda", () => {
+    for (const name of ["OnboardOSApiRole", "OnboardOSSmokeRole", "OnboardOSRunnerRole"]) {
       const role = resource(name);
       expect(role).toMatch(/Service:\s*lambda\.amazonaws\.com/);
       expect(role).not.toMatch(/AWS:\s/);

@@ -185,7 +185,11 @@ describe("data exposure: nothing hidden, internal, or manager-only leaves the AP
     const res = await workflow();
     const session = res[9]!.body.session;
     expect(Object.keys(session).sort()).toEqual(
-      ["assignmentId", "config", "organizationId", "phase", "scenario", "scenarioId", "scenarioVersion", "sessionId", "startedAt", "stateVersion", "updatedAt", "viewed"].sort(),
+      [
+        "activeTestRunId", "assignmentId", "config", "configHash", "configRevision", "currentEvidence", "organizationId",
+        "phase", "revisions", "scenario", "scenarioId", "scenarioVersion", "sessionId", "startedAt", "stateVersion",
+        "testRuns", "updatedAt", "viewed",
+      ].sort(),
     );
     expect(Object.keys(session.scenario).sort()).toEqual(
       ["diagnostics", "initialConfig", "runbook", "scenarioId", "summary", "ticket", "title", "version"].sort(),

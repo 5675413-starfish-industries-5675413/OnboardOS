@@ -6,6 +6,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "dependencies": {
-    "@onboardos/contracts": "*"
+    "@onboardos/contracts": "*",
+    "zod": "4.6.7"
   }
 }

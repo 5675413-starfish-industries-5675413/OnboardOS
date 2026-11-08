@@ -3,10 +3,13 @@ import {
   ApiError,
   createAssignment,
   fetchSession,
+  fetchTestRun,
   getMe,
   listAssignableEmployees,
   listAssignments,
   postSessionAction,
+  requestTestRun,
+  saveConfig,
   startAssignment,
 } from "../lib/api.js";
 import { getSession } from "../lib/auth.js";
@@ -135,6 +138,12 @@ const SESSION = {
   phase: "INVESTIGATING",
   stateVersion: 1,
   config: { request_timeout_ms: 800 },
+  configRevision: 0,
+  configHash: "sha256:fa812173342a39f8644ec44f9009cbd00be1f92c8a9c97e0d45fb00006bf0386",
+  revisions: [],
+  testRuns: [],
+  currentEvidence: { status: "NONE", testRunId: null },
+  activeTestRunId: null,
   viewed: { ticket: false, runbook: false, diagnostics: false },
   startedAt: "2026-11-07T10:00:00.000Z",
   updatedAt: "2026-11-07T10:00:00.000Z",
@@ -266,5 +275,83 @@ describe("employee calls", () => {
     await expect(startAssignment(ASSIGNMENT.assignmentId)).rejects.toMatchObject({ status: 401, code: "NO_SESSION" });
     await expect(listAssignments("northstar-cloud")).rejects.toMatchObject({ code: "NO_SESSION" });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+const HASH_1800 = "sha256:" + "c".repeat(64);
+const RUN = {
+  testRunId: "run_0001_aaaaaaaaaaaa",
+  status: "PASSED",
+  configRevision: 1,
+  configHash: HASH_1800,
+  configSnapshot: { request_timeout_ms: 1800 },
+  suiteVersion: 1,
+  createdAt: "2026-11-07T10:01:00.000Z",
+  completedAt: "2026-11-07T10:01:01.000Z",
+  cases: [{ caseId: "schema-valid", name: "Configuration is well-formed", status: "PASS", message: "ok" }],
+  passedCount: 1,
+  totalCount: 1,
+  executor: { kind: "AWS_LAMBDA", region: "us-east-1", runnerRequestId: "r-1", invokeRequestId: "i-1" },
+  errorCode: null,
+  errorMessage: null,
+  current: true,
+  stale: false,
+};
+const SESSION_WITH_RUN = {
+  ...SESSION,
+  stateVersion: 4,
+  config: { request_timeout_ms: 1800 },
+  configRevision: 1,
+  configHash: HASH_1800,
+  revisions: [{ revision: 1, config: { request_timeout_ms: 1800 }, configHash: HASH_1800, savedAt: "2026-11-07T10:00:30.000Z" }],
+  testRuns: [RUN],
+  currentEvidence: { status: "PASSED", testRunId: RUN.testRunId },
+};
+
+describe("configuration and test calls", () => {
+  beforeEach(() => signIn(storage, "tok"));
+
+  it("saveConfig PUTs exactly { expectedStateVersion, config } -- no revision, hash or result", async () => {
+    fetchMock.mockResolvedValue(json(200, { session: SESSION_WITH_RUN }));
+    const s = await saveConfig(SESSION.sessionId, 1, { request_timeout_ms: 1800 });
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/config`);
+    expect(sent().init.method).toBe("PUT");
+    expect(sent().body).toEqual({ expectedStateVersion: 1, config: { request_timeout_ms: 1800 } });
+    expect(s.configRevision).toBe(1);
+  });
+
+  it("requestTestRun POSTs only the expected version and returns the validated run and session", async () => {
+    fetchMock.mockResolvedValue(json(201, { testRun: RUN, session: SESSION_WITH_RUN }));
+    const r = await requestTestRun(SESSION.sessionId, 2);
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/test-runs`);
+    expect(sent().init.method).toBe("POST");
+    expect(sent().body).toEqual({ expectedStateVersion: 2 });
+    expect(r.testRun.executor?.kind).toBe("AWS_LAMBDA");
+  });
+
+  it("fetchTestRun GETs the run under the session and encodes the id", async () => {
+    fetchMock.mockResolvedValue(json(200, { testRun: RUN, session: SESSION_WITH_RUN }));
+    await fetchTestRun(SESSION.sessionId, RUN.testRunId);
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/test-runs/${RUN.testRunId}`);
+    expect(sent().init.method).toBe("GET");
+    expect(sent().body).toBeUndefined();
+    fetchMock.mockResolvedValue(json(200, { testRun: RUN, session: SESSION_WITH_RUN }));
+    await fetchTestRun(SESSION.sessionId, "../x");
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/test-runs/..%2Fx`); // separator encoded
+    expect(sent().url).not.toContain("/../");
+  });
+
+  it("surfaces server validation and conflict codes", async () => {
+    fetchMock.mockResolvedValue(json(422, { code: "CONFIG_OUT_OF_POLICY", message: "out of range", requestId: "r" }));
+    await expect(saveConfig(SESSION.sessionId, 1, { request_timeout_ms: 5000 })).rejects.toMatchObject({ status: 422, code: "CONFIG_OUT_OF_POLICY" });
+    fetchMock.mockResolvedValue(json(409, { code: "RUN_IN_PROGRESS", message: "busy", requestId: "r" }));
+    await expect(requestTestRun(SESSION.sessionId, 2)).rejects.toMatchObject({ status: 409, code: "RUN_IN_PROGRESS" });
+  });
+
+  it("rejects a run response that claims PASSED but is not the contract shape", async () => {
+    fetchMock.mockResolvedValue(json(201, { testRun: { ...RUN, executor: { kind: "SIMULATED" } }, session: SESSION_WITH_RUN }));
+    await expect(requestTestRun(SESSION.sessionId, 2)).rejects.toThrow();
+    fetchMock.mockResolvedValue(json(201, { testRun: { ...RUN, status: "SUCCESS" }, session: SESSION_WITH_RUN }));
+    await expect(requestTestRun(SESSION.sessionId, 2)).rejects.toThrow();
   });
 });

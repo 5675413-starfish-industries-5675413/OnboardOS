@@ -16,6 +16,10 @@ export default defineConfig({
       "@onboardos/scenario-fixtures": fileURLToPath(
         new URL("./packages/scenario-fixtures/src/index.ts", import.meta.url),
       ),
+      // Test-only: lets the API test suite call the real runner handler in-process.
+      "@onboardos/test-runner": fileURLToPath(
+        new URL("./services/test-runner/src/handler.ts", import.meta.url),
+      ),
     },
   },
   test: {

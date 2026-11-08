@@ -17,9 +17,11 @@ import type {
   ClientAction,
   CreateAssignmentResponse,
   ListAssignableEmployeesResponse,
+  IncidentConfig,
   MeResponse,
   SessionView,
   StartSessionResponse,
+  TestRunResponse,
 } from "@onboardos/contracts";
 import {
   CreateAssignmentResponseSchema,
@@ -27,8 +29,10 @@ import {
   ListAssignableEmployeesResponseSchema,
   ListAssignmentsResponseSchema,
   MeResponseSchema,
+  SaveConfigResponseSchema,
   SessionActionResponseSchema,
   StartSessionResponseSchema,
+  TestRunResponseSchema,
 } from "@onboardos/contracts";
 import { config } from "./config.js";
 import { getSession, clearSession } from "./auth.js";
@@ -46,7 +50,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   path: string,
   schema: { parse: (v: unknown) => T },
   body?: unknown,
@@ -161,4 +165,40 @@ export async function postSessionAction(
       action,
     })
   ).session;
+}
+
+// -- configuration and tests ----------------------------------------------------
+
+/**
+ * Save the configuration as a new immutable revision. The body is exactly
+ * { expectedStateVersion, config }: the server assigns the revision number,
+ * computes the hash, and re-validates the value (range and type).
+ */
+export async function saveConfig(
+  sessionId: string,
+  expectedStateVersion: number,
+  config: IncidentConfig,
+): Promise<SessionView> {
+  return (
+    await request("PUT", `/v1/sessions/${seg(sessionId)}/config`, SaveConfigResponseSchema, {
+      expectedStateVersion,
+      config,
+    })
+  ).session;
+}
+
+/**
+ * Run the fixed suite against the CURRENT saved revision in the AWS Lambda
+ * runner. The body carries only the version the user last saw: the client never
+ * sends a revision, a hash, a suite, an expectation or a result.
+ */
+export function requestTestRun(sessionId: string, expectedStateVersion: number): Promise<TestRunResponse> {
+  return request("POST", `/v1/sessions/${seg(sessionId)}/test-runs`, TestRunResponseSchema, {
+    expectedStateVersion,
+  });
+}
+
+/** Poll one run (the server also closes a run that never completed). */
+export function fetchTestRun(sessionId: string, testRunId: string): Promise<TestRunResponse> {
+  return request("GET", `/v1/sessions/${seg(sessionId)}/test-runs/${seg(testRunId)}`, TestRunResponseSchema);
 }
