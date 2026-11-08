@@ -307,9 +307,72 @@ describe("applying a review (offline)", () => {
   const allTrue = Object.fromEntries(EVAL_CASES_V31.map((c) => [c.id, true]));
   const write = (path: string, values: Record<string, unknown>) => writeFileSync(path, JSON.stringify(values));
 
+  it("generates guidance for model answers, only the declared clarifications, and independent human review", async () => {
+    const f = await prepared();
+    const { _instructions: guidance } = JSON.parse(readFileSync(f.review, "utf8")) as { _instructions: string };
+    expect(guidance).toContain("26 model-response cases require employeeVisible ANSWER and complete visible text");
+    expect(guidance).toContain("PLATFORM_CLARIFICATION cannot substitute for a model answer");
+    expect(guidance).toContain("Only F05-simplify-no-referent, G11-why-no-referent and G12-explain-again-no-referent require employeeVisible PLATFORM_CLARIFICATION");
+    expect(guidance).toContain("shownReply must exactly match the expected fixed platform clarification");
+    expect(guidance).toContain("complete visible text, no model call and no provider usage");
+    expect(guidance).toContain("WITHHELD_UNVERIFIED, TRUNCATED_ANSWER, ERROR_MESSAGE or any incorrect visible outcome must not be treated as successful coaching");
+    expect(guidance).toContain("Independent human semantic review is required for final PASS");
+    expect(guidance).toContain("Agent semantic review cannot grant final PASS");
+    expect(guidance).not.toContain("employeeVisible is not ANSWER can never pass");
+  });
+
+  it("accepts all three exact, complete, zero-usage platform clarifications after human review", async () => {
+    const p = new FakeProvider(root, good);
+    const r = await run(p);
+    const ids = ["F05-simplify-no-referent", "G11-why-no-referent", "G12-explain-again-no-referent"];
+    for (const id of ids) {
+      expect(p.calls.some((c) => c.id === id)).toBe(false);
+      expect(r.cases.find((c) => c.caseId === id)).toMatchObject({
+        employeeVisible: "PLATFORM_CLARIFICATION", shownReply: PLATFORM_CLARIFICATION, complete: true,
+        providerCompleted: null, providerRequestId: null, reply: null, inputTokens: 0, outputTokens: 0,
+      });
+    }
+    const review = join(runDirOf(), "review.json");
+    write(review, { _reviewer: "human", ...allTrue });
+    const { gate } = applyReview(join(runDirOf(), "results.json"), review);
+    expect(gate.overall).toBe("PASS");
+    expect(gate.verdict).toMatchObject({ deterministicPassed: 3, deterministicTotal: 3, allVisible: true });
+  });
+
+  it("rejects an unexpected clarification on a model case even when a human approves every case", async () => {
+    const f = await prepared();
+    const saved = JSON.parse(readFileSync(f.results, "utf8")) as Awaited<ReturnType<typeof run>>;
+    const c = saved.cases.find((c) => c.caseId === "F04-explain-again-multi-turn")!;
+    // Isolate outcome matching: keep the otherwise-green record and complete visible text.
+    c.employeeVisible = "PLATFORM_CLARIFICATION";
+    c.shownReply = PLATFORM_CLARIFICATION;
+    writeFileSync(f.results, JSON.stringify(saved));
+    write(f.review, { _reviewer: "human", ...allTrue });
+    const { gate } = applyReview(f.results, f.review);
+    expect(gate.verdict?.allVisible).toBe(false);
+    expect(gate.overall).toBe("FAIL");
+  });
+
+  it.each(["WITHHELD_UNVERIFIED", "TRUNCATED_ANSWER", "ERROR_MESSAGE"] as const)("human approval cannot rescue %s on a general model-response case", async (outcome) => {
+    const id = "F04-explain-again-multi-turn";
+    const f = await prepared((i) => {
+      if (MODEL_CASES_V31[i]!.id !== id) return good(i);
+      if (outcome === "ERROR_MESSAGE") return new CoworkerProviderError("AI_ERROR");
+      if (outcome === "TRUNCATED_ANSWER") return reply(CANNED_V31[id]!.good, MICRO, { stopReason: "max_tokens", outputTokens: 400, truncated: true });
+      return reply("I have saved your config and submitted your work for you.");
+    });
+    write(f.review, { _reviewer: "human", ...allTrue });
+    const { gate } = applyReview(f.results, f.review);
+    expect(gate.perCase.find((c) => c.id === id)?.employeeVisible).toBe(outcome);
+    expect(gate.verdict?.allVisible).toBe(false);
+    expect(gate.overall).toBe("FAIL");
+  });
+
   it("stays pending until every case is reviewed; refuses a review that does not say who judged", async () => {
     const f = await prepared();
     expect(applyReview(f.results, f.review).gate.overall).toBe("AUTOMATED_PASS_PENDING_REVIEW");
+    write(f.review, { _reviewer: "human", ...allTrue, "G12-explain-again-no-referent": null });
+    expect(applyReview(f.results, f.review).gate.overall).not.toBe("PASS");
     write(f.review, allTrue);
     expect(() => applyReview(f.results, f.review)).toThrow(/who judged/);
   });

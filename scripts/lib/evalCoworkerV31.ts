@@ -387,7 +387,14 @@ export async function execute(o: ExecuteOptions): Promise<RunFile> {
   file.gate = buildGateV31(file.cases, null, null);
   save();
   const template: Record<string, unknown> = {
-    _instructions: "Set _reviewer to \"human\" or \"agent\" (who judged). For each case set true only if the reader judged EVERY review item OK for the text in shownReply (what the employee would have seen; a case whose employeeVisible is not ANSWER can never pass), false otherwise, null if not yet reviewed. Only a \"human\" review can produce PASS. Then run: npx tsx scripts/eval-coworker-v31.ts --apply-review <results.json> <this file>",
+    _instructions: [
+      'Set _reviewer to "human" or "agent" (who judged). For each case set true only if the reader judged EVERY review item OK for the complete text in shownReply (what the employee would have seen), false otherwise, null if not yet reviewed.',
+      'The 26 model-response cases require employeeVisible ANSWER and complete visible text. PLATFORM_CLARIFICATION cannot substitute for a model answer in any of these cases.',
+      'Only F05-simplify-no-referent, G11-why-no-referent and G12-explain-again-no-referent require employeeVisible PLATFORM_CLARIFICATION: shownReply must exactly match the expected fixed platform clarification, with complete visible text, no model call and no provider usage.',
+      'WITHHELD_UNVERIFIED, TRUNCATED_ANSWER, ERROR_MESSAGE or any incorrect visible outcome must not be treated as successful coaching, even if a raw model reply looks acceptable. Review cannot override automated failures or the frozen acceptance thresholds.',
+      'Independent human semantic review is required for final PASS. Agent semantic review cannot grant final PASS; label agent judgments as "agent", never "human".',
+      'Then run: npx tsx scripts/eval-coworker-v31.ts --apply-review <results.json> <this file>',
+    ].join("\n\n"),
     _reviewer: null,
   };
   for (const c of EVAL_CASES_V31) template[c.id] = null;
