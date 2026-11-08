@@ -6,6 +6,8 @@ import { getSession, logout } from "../lib/auth.js";
 import { viewForRole } from "../lib/views.js";
 import { EmployeeView } from "../views/EmployeeView.js";
 import { ManagerView } from "../views/ManagerView.js";
+import { ScenariosSection } from "../views/ScenariosCard.js";
+import { config } from "../lib/config.js";
 
 function roleBadgeClass(role: OrgRole): string {
   switch (role) {
@@ -144,6 +146,8 @@ export function AppPage() {
 
       {primary && view === "manager" && <ManagerView orgId={primary.organizationId} />}
       {primary && view === "employee" && <EmployeeView orgId={primary.organizationId} />}
+      {/* An ACTIVE org admin may also manage AI coworker coaching: the API already authorizes that role. Identity screen unchanged. */}
+      {primary && view === "identity" && primary.role === "org_admin" && config.coachingStudioEnabled && <ScenariosSection orgId={primary.organizationId} />}
     </div>
   );
 }

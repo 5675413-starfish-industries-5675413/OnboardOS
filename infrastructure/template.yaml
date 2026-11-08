@@ -379,6 +379,56 @@ Resources:
             Method: POST
             Auth:
               Authorizer: JwtAuthorizer
+        # Milestone M1: manager coaching studio. All protected by the JWT authorizer; the Lambda then requires an
+        # ACTIVE manager/org_admin membership in the URL's organization. No new tables, indexes or IAM actions.
+        ApiListCoachingScenarios:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetCoachingStudio:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiSaveCoachingDraft:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft
+            Method: PUT
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiValidateCoaching:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiPublishCoaching:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetCoachingVersion:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
     Metadata:
       BuildMethod: esbuild
       BuildProperties:

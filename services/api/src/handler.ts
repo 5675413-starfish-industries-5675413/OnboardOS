@@ -45,6 +45,14 @@ import { handleGetTestRun, handleRunTests, handleSaveConfig } from "./routes/tes
 import { handleSubmitReport } from "./routes/submissions.js";
 import { handleDecideReview, handleGetReview } from "./routes/reviews.js";
 import { handleListMessages, handleSendMessage } from "./routes/coworker.js";
+import {
+  handleGetCoachingStudio,
+  handleGetCoachingVersion,
+  handleListCoachingScenarios,
+  handlePublishCoaching,
+  handleSaveCoachingDraft,
+  handleValidateCoaching,
+} from "./routes/coaching.js";
 
 /**
  * Route + dispatch with injectable dependencies. `getDeps` is lazy so that
@@ -110,6 +118,20 @@ export const handleRequest = async (
         return await handleListMessages(event, getDeps());
       case "POST /v1/sessions/{sessionId}/messages":
         return await handleSendMessage(event, getDeps());
+
+      // -- Milestone M1: manager coaching studio ------------------------------------
+      case "GET /v1/orgs/{orgId}/scenarios":
+        return await handleListCoachingScenarios(event, getDeps());
+      case "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching":
+        return await handleGetCoachingStudio(event, getDeps());
+      case "PUT /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft":
+        return await handleSaveCoachingDraft(event, getDeps());
+      case "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate":
+        return await handleValidateCoaching(event, getDeps());
+      case "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish":
+        return await handlePublishCoaching(event, getDeps());
+      case "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}":
+        return await handleGetCoachingVersion(event, getDeps());
 
       default:
         return json(404, {

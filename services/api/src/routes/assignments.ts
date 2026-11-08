@@ -18,6 +18,7 @@ import {
 } from "@onboardos/contracts";
 import { getLatestPublished } from "@onboardos/scenario-fixtures";
 import { canAssign, loadActiveMembership, NOT_FOUND, requireOrgRole } from "../authz.js";
+import { coachingRefForNewAssignment } from "../coachingRuntime.js";
 import type { ApiDeps } from "../deps.js";
 import { HttpError, json, parseBody, type HttpResult } from "../http.js";
 import { assignmentIdFor } from "../ids.js";
@@ -103,8 +104,35 @@ export async function handleCreateAssignment(
   const target = await loadActiveMembership(deps, orgId, body.employeeSub);
   if (!target || !canAssign(assigner, target)) throw NOT_FOUND();
 
+  // The coaching version is deliberately NOT part of the id: publishing must never create assignments or reset progress.
   const assignmentId = assignmentIdFor(orgId, scenario.content.scenarioId, scenario.content.version, target.userSub);
+
+  /**
+   * An assignment that already exists is returned exactly as it is. It keeps the coaching it was created with (or none), and
+   * asking for different coaching is a conflict, never a rebind. This path reads NO coaching records, so a changed, missing or
+   * corrupt published pointer cannot make a valid existing assignment fail.
+   */
+  const respondExisting = (item: Record<string, unknown> | undefined): HttpResult => {
+    const record = parseAssignment(item);
+    if (!record || record.organizationId !== orgId || record.employeeSub !== target.userSub) {
+      throw new Error("existing assignment record is missing or malformed");
+    }
+    if (body.coachingProfileVersion !== undefined && record.coachingRef?.profileVersion !== body.coachingProfileVersion) {
+      throw new HttpError(409, "COACHING_MISMATCH", "This employee already has this scenario assigned with different coaching, which cannot be changed");
+    }
+    return json(200, CreateAssignmentResponseSchema.parse({ assignment: toAssignmentView(record, true), created: false }));
+  };
+
+  // Retry / double click: look first. Only a genuinely new assignment resolves and pins coaching.
+  const already = await getAssignmentItem(deps.db, assignmentId);
+  if (already) return respondExisting(already);
+
+  // Pin the organization's published coaching (or the explicitly requested published version) NOW, verified, so a
+  // later publish cannot change what this assignment uses. Null => the platform's built-in coaching, as before M1.
+  const coachingRef = await coachingRefForNewAssignment(deps, orgId, scenario, body.coachingProfileVersion);
+
   const candidate = buildAssignmentRecord({
+    coachingRef,
     assignmentId,
     organizationId: orgId,
     scenario,
@@ -114,19 +142,9 @@ export async function handleCreateAssignment(
     now: deps.now(),
   });
 
-  // Create-if-absent. A retry (or a double click) finds the same deterministic id and
-  // returns the existing assignment instead of creating a second one.
-  const created = await putAssignmentIfAbsent(deps.db, candidate);
-  let record: AssignmentRecord | null = candidate;
-  if (!created) {
-    record = parseAssignment(await getAssignmentItem(deps.db, assignmentId));
-    if (!record || record.organizationId !== orgId || record.employeeSub !== target.userSub) {
-      throw new Error("existing assignment record is missing or malformed");
-    }
-  }
-
-  return json(
-    created ? 201 : 200,
-    CreateAssignmentResponseSchema.parse({ assignment: toAssignmentView(record, true), created }),
-  );
+  // Create-if-absent. If a concurrent request created it between our look and our write, the conditional Put loses and
+  // the winner's record is returned (with the same conflict rule for an explicit, different coaching request).
+  if (!(await putAssignmentIfAbsent(deps.db, candidate))) return respondExisting(await getAssignmentItem(deps.db, assignmentId));
+  const record: AssignmentRecord = candidate;
+  return json(201, CreateAssignmentResponseSchema.parse({ assignment: toAssignmentView(record, true), created: true }));
 }

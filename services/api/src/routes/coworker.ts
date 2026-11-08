@@ -41,7 +41,8 @@ import {
   type BedrockProvider,
   type CoworkerErrorCode,
 } from "../bedrock.js";
-import { COWORKER_PROMPT_VERSION, buildCoworkerRequest, resolveCoaching, type PriorTurn } from "../coworkerContext.js";
+import { resolveCoachingForAssignment } from "../coachingRuntime.js";
+import { COWORKER_PROMPT_VERSION, buildCoworkerRequest, type PriorTurn } from "../coworkerContext.js";
 import {
   FRESH_CONTROL,
   LEASE_MS,
@@ -65,8 +66,8 @@ import {
 } from "../coworkerStore.js";
 import type { ApiDeps } from "../deps.js";
 import { HttpError, json, parseBody, type HttpResult } from "../http.js";
-import { parseSessionState, parseTestRun } from "../records.js";
-import { getSessionItem, isTransactionCanceled, queryTestRuns } from "../repo.js";
+import { parseAssignment, parseSessionState, parseTestRun } from "../records.js";
+import { getAssignmentItem, getSessionItem, isTransactionCanceled, queryTestRuns } from "../repo.js";
 import { INTERNAL, loadOwnedSession, scenarioFor } from "./sessions.js";
 import { idempotencyKey } from "./submissions.js";
 
@@ -214,6 +215,14 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
 
   const scenario = scenarioFor(state.scenarioId, state.scenarioVersion);
 
+  // The coaching comes from THIS assignment: its frozen organization-published reference if it has one, else the built-in
+  // profile. A reference that cannot be verified is refused here, before any reservation or model call; it is never replaced.
+  const assignment = parseAssignment(await getAssignmentItem(deps.db, state.assignmentId));
+  if (!assignment || assignment.organizationId !== state.organizationId || assignment.employeeSub !== sub) {
+    throw INTERNAL("the session's assignment is missing or does not match");
+  }
+  const coaching = await resolveCoachingForAssignment(deps, assignment, scenario);
+
   // -- reserve ---------------------------------------------------------------
   let turn: TurnRecord | null = null;
   let pendingRequest: ReturnType<typeof buildCoworkerRequest> | null = null;
@@ -239,7 +248,6 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
     // Everything the model will be told is built BEFORE the reservation, from authorized records.
     const history = await historyFor(deps, state.sessionId);
     const currentRun = await currentRunFor(deps, current, scenario.testSuiteVersion);
-    const coaching = resolveCoaching(scenario);
     const request = buildCoworkerRequest({ scenario, coaching: coaching.profile, state: current, currentRun, history, message });
 
     // A previous holder whose lease expired is closed in the same transaction.

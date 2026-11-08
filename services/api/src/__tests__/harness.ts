@@ -252,6 +252,12 @@ export const R = {
   submit: "POST /v1/sessions/{sessionId}/submissions",
   review: "GET /v1/reviews/{submissionId}",
   decide: "POST /v1/reviews/{submissionId}/decision",
+  coachScenarios: "GET /v1/orgs/{orgId}/scenarios",
+  coachStudio: "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching",
+  coachSave: "PUT /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft",
+  coachValidate: "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate",
+  coachPublish: "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish",
+  coachVersion: "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}",
 } as const;
 
 export const assign = (api: Api, by: Person, employee: Person, org = ORG) =>

@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { AssignableEmployee, AssignmentView } from "@onboardos/contracts";
-import { createAssignment, listAssignableEmployees, listAssignments } from "../lib/api.js";
+import type { CoachingScenarioSummary } from "@onboardos/contracts";
+import { createAssignment, listAssignableEmployees, listAssignments, listCoachingScenarios } from "../lib/api.js";
+import { config } from "../lib/config.js";
+import { assignmentCoachingLabel, newAssignmentCoachingLine } from "../lib/coaching.js";
+import { ScenariosCard } from "./ScenariosCard.js";
 import {
   assignmentStatusLabel,
   assignmentStatusTone,
@@ -21,6 +25,9 @@ export function ManagerView({ orgId }: { orgId: string }) {
   const [employees, setEmployees] = useState<AssignableEmployee[]>([]);
   const [assignments, setAssignments] = useState<AssignmentView[]>([]);
   const [selected, setSelected] = useState("");
+  const [scenarios, setScenarios] = useState<CoachingScenarioSummary[] | null>(null);
+  const [scenariosError, setScenariosError] = useState<string | null>(null);
+  const studio = config.coachingStudioEnabled;
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,12 +39,19 @@ export function ManagerView({ orgId }: { orgId: string }) {
       const [emps, asg] = await Promise.all([listAssignableEmployees(orgId), listAssignments(orgId)]);
       setEmployees(emps.employees);
       setAssignments(asg);
+      if (studio) {
+        // Non-blocking: the dashboard works without it, and the failure is shown rather than hidden.
+        listCoachingScenarios(orgId).then(
+          (r) => { setScenarios(r.scenarios); setScenariosError(null); },
+          (e: unknown) => setScenariosError(describeApiError(e)),
+        );
+      }
     } catch (err) {
       setError(describeApiError(err));
     } finally {
       setLoading(false);
     }
-  }, [orgId]);
+  }, [orgId, studio]);
 
   useEffect(() => {
     void load();
@@ -72,6 +86,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
       <div className="card">
         <h2>Assign INC-104</h2>
         <p>Assign the checkout-timeout incident to an employee on your team.</p>
+        {studio && <p className="muted" data-testid="new-assignment-coaching">{newAssignmentCoachingLine(scenarios?.find((x) => x.scenarioId === "inc-104")?.currentProfileVersion)}</p>}
         {loading ? (
           <p role="status">Loading your team…</p>
         ) : (
@@ -102,6 +117,8 @@ export function ManagerView({ orgId }: { orgId: string }) {
         {notice && <div className="info" role="status">{notice}</div>}
         {error && <div className="error" role="alert">{error}</div>}
       </div>
+
+      {studio && <ScenariosCard scenarios={scenarios} error={scenariosError} />}
 
       <div className="card" data-testid="review-queue">
         <div className="row">
@@ -162,6 +179,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
                 <th scope="col">Employee</th>
                 <th scope="col">Incident</th>
                 <th scope="col">Status</th>
+                {studio && <th scope="col">AI coaching</th>}
                 <th scope="col">Assigned</th>
               </tr>
             </thead>
@@ -175,6 +193,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
                       {assignmentStatusLabel(a.status)}
                     </span>
                   </td>
+                  {studio && <td>{assignmentCoachingLabel(a.coaching)}</td>}
                   <td className="muted">{new Date(a.createdAt).toLocaleString()}</td>
                 </tr>
               ))}

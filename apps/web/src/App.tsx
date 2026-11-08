@@ -4,6 +4,7 @@ import { CallbackPage } from "./pages/CallbackPage.js";
 import { AppPage } from "./pages/AppPage.js";
 import { SessionPage } from "./pages/SessionPage.js";
 import { ReviewPage } from "./pages/ReviewPage.js";
+import { CoachingPage } from "./pages/CoachingPage.js";
 import { getSession } from "./lib/auth.js";
 
 /**
@@ -15,6 +16,7 @@ import { getSession } from "./lib/auth.js";
  *   /app        → AppPage (requires active session, redirects to / if not)
  *   /sessions/:id → SessionPage (the employee's workplace)
  *   /reviews/:id  → ReviewPage (manager evidence + decision; the API authorizes every call)
+ *   /scenarios/:id/coaching → CoachingPage (manager AI coworker settings; behind VITE_COACHING_STUDIO_ENABLED)
  *   *           → redirect to /
  */
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -52,6 +54,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <ReviewPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/scenarios/:scenarioId/coaching"
+          element={
+            <ProtectedRoute>
+              <CoachingPage />
             </ProtectedRoute>
           }
         />

@@ -114,7 +114,7 @@ const TurnSchema = z
     coachingProfileId: z.string().optional(),
     coachingProfileVersion: z.number().int().positive().optional(),
     coachingProfileHash: z.string().optional(),
-    coachingProfileSource: z.enum(["BUILTIN", "PLATFORM_DEFAULT", "INVALID_FALLBACK"]).optional(),
+    coachingProfileSource: z.enum(["BUILTIN", "PLATFORM_DEFAULT", "INVALID_FALLBACK", "ORG_PUBLISHED"]).optional(),
     createdAt: z.string(),
     completedAt: z.string().nullable(),
     errorCode: z.string().nullable(),
@@ -151,7 +151,7 @@ export function buildPendingTurn(input: {
   userText: string;
   modelId: string;
   promptVersion: string;
-  coaching?: { profileId: string; profileVersion: number; hash: string; source: "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" };
+  coaching?: { profileId: string; profileVersion: number; hash: string; source: "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" | "ORG_PUBLISHED" };
   now: string;
 }): TurnRecord {
   return {

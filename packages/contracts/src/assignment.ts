@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AssignmentCoachingViewSchema } from "./coachingStudio.js";
 import { ScenarioIdSchema } from "./scenario.js";
 
 /**
@@ -48,6 +49,8 @@ export const AssignmentViewSchema = z.object({
   /** The most recent frozen submission, once there is one (the manager's review link). */
   latestSubmissionId: z.string().nullable(),
   employee: EmployeeRefSchema.optional(),
+  /** Manager projection only: which coaching this assignment was created with. It never changes afterwards. */
+  coaching: AssignmentCoachingViewSchema.optional(),
 });
 export type AssignmentView = z.infer<typeof AssignmentViewSchema>;
 
@@ -61,6 +64,11 @@ export type AssignmentView = z.infer<typeof AssignmentViewSchema>;
 export const CreateAssignmentRequestSchema = z.strictObject({
   scenarioId: ScenarioIdSchema,
   employeeSub: UserSubSchema,
+  /**
+   * Optional: pin a specific PUBLISHED coaching version of this organization. Omitted = the organization's current
+   * published version (or the platform's built-in coaching if it has published none).
+   */
+  coachingProfileVersion: z.number().int().positive().optional(),
 });
 export type CreateAssignmentRequest = z.infer<typeof CreateAssignmentRequestSchema>;
 

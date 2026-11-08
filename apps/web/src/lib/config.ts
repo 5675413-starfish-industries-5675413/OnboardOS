@@ -37,6 +37,14 @@ export const config = {
   get coworkerEnabled(): boolean {
     return env("VITE_COWORKER_ENABLED").toLowerCase() === "true";
   },
+  /**
+   * Feature flag for the manager Coaching Studio (milestone M1). OFF unless set to exactly "true" (any case).
+   * Same reason as the coworker flag: the frontend deploys from Git on merge, the routes it calls deploy separately
+   * with SAM. Build-time; a convenience, not a control (the API authorizes every call).
+   */
+  get coachingStudioEnabled(): boolean {
+    return env("VITE_COACHING_STUDIO_ENABLED").toLowerCase() === "true";
+  },
   cognito: {
     get userPoolId(): string {
       return env("VITE_COGNITO_USER_POOL_ID");

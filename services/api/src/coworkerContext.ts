@@ -76,7 +76,7 @@ export function neutralize(s: string): string {
 const oneLine = (s: string): string => neutralize(s).replace(/\s+/g, " ").trim();
 
 /** Where the profile applied to a turn came from. Recorded on the turn so the policy in force is auditable. */
-export type CoachingSource = "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK";
+export type CoachingSource = "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" | "ORG_PUBLISHED";
 
 export interface ResolvedCoaching {
   profile: ScenarioCoachingProfile;
@@ -94,9 +94,14 @@ const canonical = (v: unknown): unknown =>
       ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, canonical(x)]))
       : v;
 
+/** SHA-256 of the canonical (key-sorted) JSON of any value. Stable across key order. */
+export function contentHash(value: unknown): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify(canonical(value)), "utf8").digest("hex")}`;
+}
+
 /** Content hash of a profile; pinned in tests for built-ins so an unversioned edit fails CI. */
 export function coachingProfileHash(profile: ScenarioCoachingProfile): string {
-  return `sha256:${createHash("sha256").update(JSON.stringify(canonical(profile)), "utf8").digest("hex")}`;
+  return contentHash(profile);
 }
 
 /**
@@ -158,6 +163,21 @@ const UNCERTAINTY: Record<CoachingPreferences["uncertainty"], string> = {
     "When you are unsure, or the materials do not say, state plainly what is not known and where in the materials the employee could look. Never fill a gap with invented specifics.",
   ask_first: "When you are unsure, or the materials do not say, ask the employee one brief clarifying question before answering.",
 };
+
+/**
+ * What a set of coaching preferences instructs the coworker to do, as the platform's own sentences (the same ones the
+ * rules use), one per setting. Used by the manager preview. It describes instructions; it does not test any model.
+ */
+export function describeCoachingBehaviour(p: CoachingPreferences): string[] {
+  return [
+    ASSISTANCE[p.assistance],
+    HINTS[p.hintProgression],
+    TONES[p.tone],
+    `Answers aim for about ${p.maxWords} words. This is a preference given to the model, not a guaranteed limit.`,
+    OFF_TOPIC[p.offTopic],
+    UNCERTAINTY[p.uncertainty],
+  ];
+}
 
 function platformRules(p: CoachingPreferences): string {
   return `You are "Coworker", an AI colleague in a workplace training simulation. You help one employee complete a task assigned by their employer. Who the employee is and what they are learning is described under COACHING CONTEXT below. (prompt ${COWORKER_PROMPT_VERSION})

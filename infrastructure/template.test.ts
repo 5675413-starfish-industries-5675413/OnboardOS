@@ -110,6 +110,13 @@ describe("API routes and authorization", () => {
     "POST /v1/reviews/{submissionId}/decision",
     "GET /v1/sessions/{sessionId}/messages",
     "POST /v1/sessions/{sessionId}/messages",
+    // Milestone M1: manager coaching studio
+    "GET /v1/orgs/{orgId}/scenarios",
+    "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching",
+    "PUT /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft",
+    "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate",
+    "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish",
+    "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}",
   ];
 
   it("declares exactly the intended routes: nothing extra can be added silently", () => {
@@ -128,9 +135,21 @@ describe("API routes and authorization", () => {
     }
   });
 
-  it("only uses methods the API implements (GET, POST and the one PUT; no PATCH/DELETE routes)", () => {
+  it("only uses methods the API implements (GET, POST and exactly two PUTs; no PATCH/DELETE routes)", () => {
     for (const r of apiRoutes()) expect(["GET", "POST", "PUT"]).toContain(r.method);
-    expect(apiRoutes().filter((r) => r.method === "PUT").map((r) => r.path)).toEqual(["/v1/sessions/{sessionId}/config"]);
+    expect(apiRoutes().filter((r) => r.method === "PUT").map((r) => r.path).sort()).toEqual([
+      "/v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft",
+      "/v1/sessions/{sessionId}/config",
+    ]);
+  });
+
+  it("the coaching studio adds routes only: the API role, tables, indexes and runner are unchanged by it", () => {
+    const coaching = apiRoutes().filter((r) => r.path.includes("/scenarios"));
+    expect(coaching).toHaveLength(6);
+    for (const r of coaching) expect(r.authorizer, r.path).toBe("JwtAuthorizer");
+    // Items live in the existing Core table: no DeleteItem, no Scan, no new table or index.
+    expect(resource("OnboardOSApiRole")).not.toMatch(/DeleteItem|Scan|BatchWrite/);
+    expect(TEXT.match(/Type: AWS::DynamoDB::Table/g)).toHaveLength(2);
   });
 
   it("validates tokens against this user pool and this SPA client", () => {

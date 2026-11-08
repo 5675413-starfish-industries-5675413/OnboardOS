@@ -21,4 +21,5 @@ export * from "./submission.js";
 export * from "./review.js";
 export * from "./coworker.js";
 export * from "./coaching.js";
+export * from "./coachingStudio.js";
 export * from "./session.js";

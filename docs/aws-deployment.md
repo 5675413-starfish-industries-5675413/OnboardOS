@@ -1281,3 +1281,59 @@ Stored `CHAT#` items are ignored by older code and harmless. `sam delete` is not
 | Timeouts | Bedrock abort 20 s, SDK request timeout 20 s, Lambda 29 s (inherited), API Gateway 30 s, lease 60 s. The Bedrock SDK client uses an HTTP/2 handler: the timeout is verified on the resolved handler configuration, `connectionTimeout` (an HTTP/1 option that would be ignored) was removed and the SDK default `disableConcurrentStreams` restated. A connection reused after a Lambda freeze could fail its first call; that is recorded as an `ERROR` turn and the user asks again (no automatic retry by design). |
 | Isolation | Ledger, control and turns are keyed by session; every read re-parses and re-checks `sessionId`; the model input has no parameter for another user's data. |
 | Frontend | No SDK, model id, prompt or suite text in the browser source or the built bundle (tests and a bundle scan). |
+
+## Milestone M1: manager Coaching Studio (PREPARED LOCALLY, NOT DEPLOYED)
+
+Branch `feat/manager-coaching-studio`, on top of the committed coworker-v2 checkpoint `e4f634c`. Nothing here has been deployed, pushed or run against live AWS.
+
+### Routes (all JWT-protected; the Lambda then requires an ACTIVE manager or org_admin membership in the URL's organization)
+| Route | Purpose |
+|---|---|
+| `GET /v1/orgs/{orgId}/scenarios` | Supported (executable) scenarios and this organization's coaching status |
+| `GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching` | Template, draft, published versions, current version |
+| `PUT .../coaching/draft` | Save the draft; body `{expectedRevision, content}`; stale revision => 409 |
+| `POST .../coaching/validate` | Validate unsaved content and describe the behaviour; persists nothing, calls no model |
+| `POST .../coaching/publish` | Publish an immutable version; body `{draftRevision, expectedCurrentVersion}` |
+| `GET .../coaching/versions/{profileVersion}` | Inspect one published version (read only) |
+`POST /v1/orgs/{orgId}/assignments` gains an optional `coachingProfileVersion`; assignment views gain `coaching` (managers only).
+
+### Records (existing Core table, organization partition; no new table, index, or IAM action)
+`ORG#<org>` with sort keys `COACHDRAFT#<scenario>#v<scenarioVersion>`, `COACHPUB#<scenario>#v<scenarioVersion>#<profileVersion>`, `COACHCUR#<scenario>#v<scenarioVersion>`. Assignment items gain an optional `coachingRef {source, profileId, profileVersion, contentHash}`; chat turns record `coachingProfileSource: ORG_PUBLISHED` when applicable.
+
+### Infrastructure delta
+Six API routes (template.yaml) and nothing else. The API role already grants Get/Put/Update/Query on the Core table; publishing needs no `ConditionCheckItem` (the draft is stamped with a conditional Update instead). `DeleteItem` stays ungranted, so a published version cannot be deleted by the API.
+
+### Deployment order and flags
+1. Deploy the stack (routes + API code). Behaviour of existing assignments and sessions is unchanged: no `coachingRef` means built-in coaching.
+2. Only then build the frontend with `VITE_COACHING_STUDIO_ENABLED=true` (build-time, default OFF), so a Git-triggered frontend deploy cannot show screens whose routes do not exist yet.
+
+### Not verified on AWS
+Every row of the live verification list is NOT RUN: real Cognito login as a manager, DynamoDB transaction semantics for publish (the fake DynamoDB implements the conditions the code uses; a real table has not been exercised), CORS for the new PUT path, and a real coworker question under a published profile.
+
+### M1 hardening notes (local review, still NOT deployed)
+- **Publish cancellation reasons** are mapped, not guessed: `TransactionConflict` => 409 `TRY_AGAIN` (nothing written, retry), `ThrottlingError`/`ProvisionedThroughputExceeded` => 503 `BUSY`, a failed pointer condition => 409 `VERSION_CONFLICT`, a failed draft condition => 409 `REVISION_CONFLICT`, anything else => 500. A transaction is all-or-nothing, so a cancelled publish leaves nothing behind.
+- **Inconsistent stored state fails closed** (500 plus a `COACHING_STATE_INCONSISTENT` log with a fixed reason, never overwriting): a pointer whose target version is unusable, or a next version number that already exists while the pointer says otherwise.
+- **Reads** of coaching records (Get and Query) are all strongly consistent reads of the base table; none uses an index.
+- **DynamoDB reserved words**: no expression uses one as a bare attribute name (checked against the AWS list in a test, because the in-memory fake cannot).
+- **Bundle evidence** (real `sam build`, compared with the coworker-v2 checkpoint `e4f634c`, whose runner and smoke bundles equal the deployed code): API changed; Smoke byte-identical; ScenarioRunner changed only by inert Zod schema definitions from the shared contracts package (a new `coachingStudio.ts` section and two optional fields on the assignment schemas), with the suite and handler logic byte-identical. Web bundle gains the feature-flagged Studio screens and contains no model id, prompt, suite id or evaluator text.
+- **Future change set should touch**: `OnboardOSApiFunction` (code), `OnboardOSScenarioRunner` (code only, no behaviour change), six `AWS::Serverless::Function` HttpApi events (and the API Gateway routes/integration they create), and nothing else. It should show NO change to tables, indexes, IAM roles/policies, Cognito, the smoke function, parameters or outputs. Any other resource in the change set is a stop-and-ask.
+
+### M1 live verification plan (DESIGN ONLY: nothing below has been run, and no identity or record has been created)
+**Why a fresh employee is needed.** Both Northstar employees already have INC-104 assigned. Assignment ids are deterministic per (organization, scenario version, employee), so assigning again returns the existing assignment unchanged, which is correct and cannot demonstrate pinning.
+
+| Option | What it touches | Verdict |
+|---|---|---|
+| A. One new employee in `northstar-cloud` (for example `employee3@northstar-demo.example`, team `cloud-team-1`) | One new Cognito user and one new membership item (create-if-absent via the existing seed script). New assignment, session and chat items for that user. Plus the coaching items the test publishes. No existing item is written. | **Recommended**: smallest, tests the real path (Cognito, JWT, DynamoDB, Bedrock). |
+| B. A separate test organization | Needs new accounts too (a Cognito user is global), a second membership for the manager (the UI uses the first membership), changes to the seed script (it checks `DemoOrgId`), and an org record. | Larger and ambiguous in the UI; rejected for now. |
+| C. A disposable second stack | New tables, Cognito pool, API, hosted UI domain, callbacks, seed, frontend env. | Cleanest isolation and permits cleanup by deleting the stack; most work. Use if you want zero writes to the live organization. |
+
+**Side effects of A to accept knowingly.** Published coaching versions cannot be deleted through the API (no `DeleteItem`). After the test, `northstar-cloud` has a current published coaching version, so any NEW assignment there is pinned to it. Write realistic content you are happy to keep, or have an operator with admin credentials remove the `COACH*` items afterwards. The new employee will show the same display name as the existing ones ("employee"); the manager picks the dropdown option whose button does not read "Already assigned".
+
+**Prerequisites.** (1) Review and approve a prepare-only change set (API and runner code, six routes). (2) Deploy it, then confirm the API still serves existing sessions (legacy assignments use built-in coaching). (3) Build the frontend locally with `VITE_COACHING_STUDIO_ENABLED=true` and `VITE_COWORKER_ENABLED=true` against `http://localhost:5173` (no Vercel change needed). (4) A read-only snapshot of the existing assignments, sessions, events and test runs (counts and hashes) before and after.
+
+**Human approval points.** (a) Deploying the change set. (b) Creating the new Cognito identity and choosing its password at the hidden prompt. (c) The first publish of a live coaching version (permanent). (d) The first paid coworker question under the published profile.
+
+**Steps.** Manager signs in; opens Scenarios; saves a draft; validates; publishes v1; assigns INC-104 to the new employee (card says v1); new employee signs in in a separate browser profile, starts the investigation, asks one question; read-only checks confirm the turn records `ORG_PUBLISHED`, the profile id, version 1 and the hash, `stateVersion` unchanged by chat, and that the two original employees' assignment, session, review and test records are byte-identical to the snapshot. Then publish v2 and confirm the new employee's assignment still says v1 and a second question still uses v1.
+
+### Real DynamoDB integration test (DESIGN ONLY: not run)
+Purpose: execute the publish transaction, conditional updates and strongly consistent reads against a real table, which the in-memory fake cannot prove. Run it from a script with the operator's credentials (never from the API role), against the Core table, using only disposable keys: organization `it-<12 random hex>` and scenario `inc-104`, so every key is `ORG#it-<hex>` / `COACH...`. Cases: first draft create, stale update refused, first publish with no pointer, second publish with compare-and-set, an identical publish retry, two concurrent publishes (exactly one wins), a draft edited during a publish (cancelled with nothing written), and a pointer behind the versions (refused). Cleanup: the script lists the partition (`Query PK = ORG#it-<hex>`, bounded) and deletes exactly those items, printing the count, and refuses to delete any key not starting with `ORG#it-`. Verify the partition is empty afterwards. Needs `dynamodb:DeleteItem` for the operator, which the API role deliberately lacks.

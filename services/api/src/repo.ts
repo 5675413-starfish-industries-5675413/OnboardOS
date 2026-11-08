@@ -29,6 +29,16 @@ export function isTransactionCanceled(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "TransactionCanceledException";
 }
 
+/**
+ * Why a TransactWriteItems was cancelled, one code per action in request order ("None" for an action that would have
+ * succeeded): ConditionalCheckFailed, TransactionConflict, ThrottlingError, ProvisionedThroughputExceeded, ValidationError, ...
+ * Empty when the service gave no reasons.
+ */
+export function cancellationCodes(err: unknown): string[] {
+  const reasons = (err as { CancellationReasons?: unknown } | null)?.CancellationReasons;
+  return Array.isArray(reasons) ? reasons.map((r) => (typeof (r as { Code?: unknown })?.Code === "string" ? (r as { Code: string }).Code : "None")) : [];
+}
+
 // ---------------------------------------------------------------------------
 // Membership (read-only)
 // ---------------------------------------------------------------------------
