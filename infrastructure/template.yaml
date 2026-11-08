@@ -108,8 +108,10 @@ Resources:
       # Add the hosted frontend URL here after Phase 3 hosting is set up
       CallbackURLs:
         - "http://localhost:5173/callback"
+        - "https://onboard-os-nine.vercel.app/callback"
       LogoutURLs:
         - "http://localhost:5173"
+        - "https://onboard-os-nine.vercel.app"
       # Supported identity providers: Cognito only (no external IdPs in Phase 2A)
       SupportedIdentityProviders:
         - COGNITO
@@ -197,6 +199,7 @@ Resources:
       CorsConfiguration:
         AllowOrigins:
           - "http://localhost:5173"
+          - "https://onboard-os-nine.vercel.app"
         AllowMethods:
           - GET
           - POST
