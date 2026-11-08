@@ -2,9 +2,11 @@ import { z } from "zod";
 import { ScenarioIdSchema } from "./scenario.js";
 
 /**
- * Assignment lifecycle (architecture freeze section E). Only ASSIGNED and
- * IN_PROGRESS are produced by the current slice; the rest are reserved so the
- * contract does not change when submission and review land.
+ * Assignment lifecycle (architecture freeze section E).
+ * Produced now: ASSIGNED, IN_PROGRESS, AWAITING_REVIEW, APPROVED, REVISION_REQUESTED.
+ * Reserved for the Bedrock slice: SUBMITTED and EVALUATING. Without AI a submission
+ * moves IN_PROGRESS -> AWAITING_REVIEW in ONE transaction (evaluation = NOT_CONFIGURED);
+ * a two-step write would need a non-atomic second transition and could strand a submission.
  */
 export const AssignmentStatusSchema = z.enum([
   "ASSIGNED",
@@ -41,6 +43,10 @@ export const AssignmentViewSchema = z.object({
   sessionId: z.string().nullable(),
   createdAt: z.string(),
   startedAt: z.string().nullable(),
+  /** 1 for the first attempt; incremented when a manager requests a revision and the employee begins again. */
+  attemptNumber: z.number().int().positive(),
+  /** The most recent frozen submission, once there is one (the manager's review link). */
+  latestSubmissionId: z.string().nullable(),
   employee: EmployeeRefSchema.optional(),
 });
 export type AssignmentView = z.infer<typeof AssignmentViewSchema>;

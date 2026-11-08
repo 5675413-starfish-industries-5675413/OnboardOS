@@ -2,15 +2,18 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ApiError,
   createAssignment,
+  fetchReview,
   fetchSession,
   fetchTestRun,
   getMe,
   listAssignableEmployees,
   listAssignments,
   postSessionAction,
+  postReviewDecision,
   requestTestRun,
   saveConfig,
   startAssignment,
+  submitReport,
 } from "../lib/api.js";
 import { getSession } from "../lib/auth.js";
 import { setupBrowserEnv, signIn, type FakeStorage } from "./helpers.js";
@@ -127,6 +130,8 @@ const ASSIGNMENT = {
   sessionId: null,
   createdAt: "2026-11-07T10:00:00.000Z",
   startedAt: null,
+  attemptNumber: 1,
+  latestSubmissionId: null,
 };
 
 const SESSION = {
@@ -144,6 +149,9 @@ const SESSION = {
   testRuns: [],
   currentEvidence: { status: "NONE", testRunId: null },
   activeTestRunId: null,
+  attemptNumber: 1,
+  submission: null,
+  submissions: [],
   viewed: { ticket: false, runbook: false, diagnostics: false },
   startedAt: "2026-11-07T10:00:00.000Z",
   updatedAt: "2026-11-07T10:00:00.000Z",
@@ -353,5 +361,93 @@ describe("configuration and test calls", () => {
     await expect(requestTestRun(SESSION.sessionId, 2)).rejects.toThrow();
     fetchMock.mockResolvedValue(json(201, { testRun: { ...RUN, status: "SUCCESS" }, session: SESSION_WITH_RUN }));
     await expect(requestTestRun(SESSION.sessionId, 2)).rejects.toThrow();
+  });
+});
+
+const SUB_ID = "sub_01_" + "d".repeat(32);
+const FROZEN_RUN = (({ current: _c, stale: _s, ...rest }) => rest)(RUN);
+const SUBMISSION = {
+  submissionId: SUB_ID,
+  attemptNumber: 1,
+  sessionId: SESSION.sessionId,
+  assignmentId: ASSIGNMENT.assignmentId,
+  organizationId: "northstar-cloud",
+  scenarioId: "inc-104",
+  scenarioVersion: 1,
+  rubricVersion: 1,
+  manifestVersion: 1,
+  submittedAt: "2026-11-07T10:05:00.000Z",
+  report: {
+    rootCause: "root cause text here", correctiveAction: "corrective text here", verification: "verification text here", remainingRisks: "risk text here too",
+  },
+  config: { revision: 1, configHash: HASH_1800, snapshot: { request_timeout_ms: 1800 } },
+  testRun: FROZEN_RUN,
+  investigation: { ticketOpened: true, runbookOpened: false, diagnosticsOpened: true },
+  evidence: { eventSequence: 6 },
+  evaluation: { status: "NOT_CONFIGURED", message: "No AI evaluation." },
+  review: null,
+};
+const BUNDLE = {
+  submission: SUBMISSION,
+  employee: { userSub: "emp-1", displayName: "Employee" },
+  assignment: { assignmentId: ASSIGNMENT.assignmentId, scenarioTitle: "INC-104", status: "AWAITING_REVIEW", attemptNumber: 1, latestSubmissionId: SUB_ID },
+  history: [{ submissionId: SUB_ID, attemptNumber: 1, submittedAt: SUBMISSION.submittedAt, testStatus: "PASSED", configRevision: 1, review: null }],
+  timeline: [{ sequence: 1, type: "INVESTIGATION_STARTED", occurredAt: "2026-11-07T10:00:00.000Z", actor: "EMPLOYEE", summary: "Started" }],
+  canDecide: true,
+};
+
+describe("submission and review calls", () => {
+  beforeEach(() => signIn(storage, "tok"));
+
+  it("submitReport sends the Idempotency-Key header and a body of exactly the report plus the evidence assertion", async () => {
+    fetchMock.mockResolvedValue(json(201, { submission: SUBMISSION, session: SESSION_WITH_RUN, created: true }));
+    const input = {
+      expectedStateVersion: 4, testRunId: RUN.testRunId, configRevision: 1, configHash: HASH_1800, report: SUBMISSION.report,
+    };
+    const r = await submitReport(SESSION.sessionId, input, "key-12345678");
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/submissions`);
+    expect(sent().init.method).toBe("POST");
+    expect(sent().headers["Idempotency-Key"]).toBe("key-12345678");
+    expect(sent().headers["Authorization"]).toBe("Bearer tok");
+    expect(sent().body).toEqual(input);
+    expect(r.created).toBe(true);
+  });
+
+  it("submitReport surfaces evidence and conflict errors as typed errors", async () => {
+    fetchMock.mockResolvedValue(json(422, { code: "EVIDENCE_NOT_CURRENT", message: "run the tests", requestId: "r" }));
+    await expect(
+      submitReport(SESSION.sessionId, { expectedStateVersion: 1, testRunId: RUN.testRunId, configRevision: 0, configHash: HASH_1800, report: SUBMISSION.report }, "key-12345678"),
+    ).rejects.toMatchObject({ status: 422, code: "EVIDENCE_NOT_CURRENT" });
+  });
+
+  it("fetchReview GETs the bundle and validates it", async () => {
+    fetchMock.mockResolvedValue(json(200, { review: BUNDLE }));
+    const b = await fetchReview(SUB_ID);
+    expect(sent().url).toBe(`https://api.example.com/v1/reviews/${SUB_ID}`);
+    expect(sent().init.method).toBe("GET");
+    expect(b.submission.testRun.executor?.kind).toBe("AWS_LAMBDA");
+  });
+
+  it("a review bundle that lies about the evaluation or the executor is rejected by the contract", async () => {
+    fetchMock.mockResolvedValue(json(200, { review: { ...BUNDLE, submission: { ...SUBMISSION, evaluation: { status: "AI_APPROVED", message: "x" } } } }));
+    await expect(fetchReview(SUB_ID)).rejects.toThrow();
+    fetchMock.mockResolvedValue(json(200, { review: { ...BUNDLE, submission: { ...SUBMISSION, testRun: { ...FROZEN_RUN, executor: { kind: "SIMULATED" } } } } }));
+    await expect(fetchReview(SUB_ID)).rejects.toThrow();
+  });
+
+  it("postReviewDecision sends only the decision (and feedback when present) -- never a reviewer, status or id", async () => {
+    fetchMock.mockResolvedValue(json(200, { review: BUNDLE }));
+    await postReviewDecision(SUB_ID, "APPROVE", "   ");
+    expect(sent().url).toBe(`https://api.example.com/v1/reviews/${SUB_ID}/decision`);
+    expect(sent().init.method).toBe("POST");
+    expect(sent().body).toEqual({ decision: "APPROVE" });
+    fetchMock.mockResolvedValue(json(200, { review: BUNDLE }));
+    await postReviewDecision(SUB_ID, "REQUEST_REVISION", "  Please test a higher timeout.  ");
+    expect(sent().body).toEqual({ decision: "REQUEST_REVISION", feedback: "Please test a higher timeout." });
+  });
+
+  it("a decision on an already-decided submission is a typed 409", async () => {
+    fetchMock.mockResolvedValue(json(409, { code: "ALREADY_DECIDED", message: "decided", requestId: "r" }));
+    await expect(postReviewDecision(SUB_ID, "APPROVE", "")).rejects.toMatchObject({ status: 409, code: "ALREADY_DECIDED" });
   });
 });

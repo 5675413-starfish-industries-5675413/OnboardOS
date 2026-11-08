@@ -13,6 +13,7 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import {
   GetSessionResponseSchema,
+  MAX_ATTEMPTS,
   SessionActionRequestSchema,
   SessionActionResponseSchema,
   StartSessionResponseSchema,
@@ -43,6 +44,7 @@ import {
   getSessionItem,
   isTransactionCanceled,
   transactApplyAction,
+  transactStartNextAttempt,
   transactStartSession,
 } from "../repo.js";
 
@@ -77,7 +79,7 @@ export async function loadOwnedSession(
 
 /** Load the existing session for an assignment that is already in progress. */
 async function loadExistingSession(deps: ApiDeps, assignment: AssignmentRecord): Promise<WorkplaceState> {
-  const expectedId = sessionIdFor(assignment.assignmentId);
+  const expectedId = sessionIdFor(assignment.assignmentId, assignment.attemptNumber);
   if (assignment.sessionId !== expectedId) throw INTERNAL("assignment references an unexpected session");
   const item = await getSessionItem(deps.db, expectedId);
   const state = item ? parseSessionState(item) : null;
@@ -85,6 +87,56 @@ async function loadExistingSession(deps: ApiDeps, assignment: AssignmentRecord):
     throw INTERNAL("assignment is in progress but its session is missing or inconsistent");
   }
   return state;
+}
+
+/** Start attempt N+1 on an assignment whose latest submission got REQUEST_REVISION. */
+async function beginNextAttempt(
+  deps: ApiDeps,
+  assignment: AssignmentRecord,
+  sub: string,
+  scenario: ReturnType<typeof scenarioFor>,
+): Promise<HttpResult> {
+  const attempt = assignment.attemptNumber + 1;
+  if (attempt > MAX_ATTEMPTS) {
+    throw new HttpError(409, "ATTEMPT_LIMIT_REACHED", "This assignment has no attempts remaining");
+  }
+  const previousSessionId = sessionIdFor(assignment.assignmentId, assignment.attemptNumber);
+  if (assignment.sessionId !== previousSessionId) throw INTERNAL("assignment references an unexpected session");
+
+  const newSessionId = sessionIdFor(assignment.assignmentId, attempt);
+  const now = deps.now();
+  const started = startSession(
+    scenario,
+    { sessionId: newSessionId, assignmentId: assignment.assignmentId, organizationId: assignment.organizationId, employeeSub: sub, attemptNumber: attempt },
+    { now, actorSub: sub },
+  );
+  if (!started.ok || started.events.length !== 1 || !started.events[0]) throw INTERNAL("engine rejected a valid start");
+
+  try {
+    await transactStartNextAttempt(deps.db, {
+      sessionItem: sessionItem(started.nextState),
+      firstEventItem: eventItem(started.nextState, started.events[0]),
+      assignmentId: assignment.assignmentId,
+      previousSessionId,
+      newSessionId,
+      attemptNumber: attempt,
+      employeeSub: sub,
+      now,
+    });
+  } catch (err) {
+    if (!isTransactionCanceled(err)) throw err;
+    // A concurrent "begin" may have won. If the assignment now points at the new attempt, resume it.
+    const latest = parseAssignment(await getAssignmentItem(deps.db, assignment.assignmentId));
+    if (latest && latest.status === "IN_PROGRESS" && latest.employeeSub === sub && latest.attemptNumber === attempt) {
+      const state = await loadExistingSession(deps, latest);
+      const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
+      return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
+    }
+    throw new HttpError(409, "CONFLICT", "The next attempt could not be started");
+  }
+
+  const history = await loadHistory(deps.db, newSessionId, assignment.assignmentId);
+  return json(201, StartSessionResponseSchema.parse({ session: toSessionView(started.nextState, scenario, history), created: true }));
 }
 
 export async function handleStartAssignment(
@@ -107,14 +159,22 @@ export async function handleStartAssignment(
 
   const scenario = scenarioFor(assignment.scenarioId, assignment.scenarioVersion);
 
-  // Already started: this is a retry/resume. Return the existing authoritative session.
-  if (assignment.status === "IN_PROGRESS") {
-    const state = await loadExistingSession(deps, assignment);
-    const history = await loadHistory(deps.db, state.sessionId);
-    return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
+  // A revision was requested: begin the NEXT attempt as a brand-new session. The previous
+  // session, its frozen submission and the manager's decision are left exactly as they were.
+  if (assignment.status === "REVISION_REQUESTED") {
+    return beginNextAttempt(deps, assignment, sub, scenario);
   }
+
+  // Already started (in progress, or submitted/decided and awaiting the next step): this is a
+  // retry/resume. Return the existing authoritative session; a submitted attempt is read-only.
   if (assignment.status !== "ASSIGNED") {
-    throw new HttpError(409, "INVALID_ASSIGNMENT_STATE", "This assignment can no longer be started");
+    // Past ASSIGNED there must be a session to resume; without one this assignment cannot be started.
+    if (assignment.sessionId === null) {
+      throw new HttpError(409, "INVALID_ASSIGNMENT_STATE", "This assignment can no longer be started");
+    }
+    const state = await loadExistingSession(deps, assignment);
+    const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
+    return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
   }
 
   const sessionId = sessionIdFor(assignment.assignmentId);
@@ -143,7 +203,7 @@ export async function handleStartAssignment(
     const latest = parseAssignment(await getAssignmentItem(deps.db, assignmentId));
     if (latest && latest.status === "IN_PROGRESS" && latest.employeeSub === sub) {
       const state = await loadExistingSession(deps, latest);
-      const history = await loadHistory(deps.db, state.sessionId);
+      const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
       return json(200, StartSessionResponseSchema.parse({ session: toSessionView(state, scenario, history), created: false }));
     }
     throw new HttpError(409, "CONFLICT", "The assignment could not be started");
@@ -158,7 +218,7 @@ export async function handleGetSession(
 ): Promise<HttpResult> {
   const { state } = await loadOwnedSession(deps, event);
   const scenario = scenarioFor(state.scenarioId, state.scenarioVersion);
-  const history = await loadHistory(deps.db, state.sessionId);
+  const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
   return json(200, GetSessionResponseSchema.parse({ session: toSessionView(state, scenario, history) }));
 }
 
@@ -194,6 +254,6 @@ export async function handleSessionAction(
     throw err;
   }
 
-  const history = await loadHistory(deps.db, state.sessionId);
+  const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
   return json(200, SessionActionResponseSchema.parse({ session: toSessionView(result.nextState, scenario, history) }));
 }

@@ -16,6 +16,9 @@
  *   PUT  /v1/sessions/{sessionId}/config
  *   POST /v1/sessions/{sessionId}/test-runs
  *   GET  /v1/sessions/{sessionId}/test-runs/{runId}
+ *   POST /v1/sessions/{sessionId}/submissions
+ *   GET  /v1/reviews/{submissionId}
+ *   POST /v1/reviews/{submissionId}/decision
  *
  * Route keys are API Gateway's templated keys, matched exactly. Anything else
  * is a 404. The smoke-test handler lives in smokeTest.ts and is NOT wired to
@@ -37,6 +40,8 @@ import {
   handleStartAssignment,
 } from "./routes/sessions.js";
 import { handleGetTestRun, handleRunTests, handleSaveConfig } from "./routes/testRuns.js";
+import { handleSubmitReport } from "./routes/submissions.js";
+import { handleDecideReview, handleGetReview } from "./routes/reviews.js";
 
 /**
  * Route + dispatch with injectable dependencies. `getDeps` is lazy so that
@@ -88,6 +93,14 @@ export const handleRequest = async (
         return await handleRunTests(event, getDeps());
       case "GET /v1/sessions/{sessionId}/test-runs/{runId}":
         return await handleGetTestRun(event, getDeps());
+
+      // -- Phase 2D: frozen submission and manager review -----------------------
+      case "POST /v1/sessions/{sessionId}/submissions":
+        return await handleSubmitReport(event, getDeps());
+      case "GET /v1/reviews/{submissionId}":
+        return await handleGetReview(event, getDeps());
+      case "POST /v1/reviews/{submissionId}/decision":
+        return await handleDecideReview(event, getDeps());
 
       default:
         return json(404, {

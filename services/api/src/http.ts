@@ -48,13 +48,13 @@ export const MAX_BODY_BYTES = 4096;
  * requests are STRICT, so unexpected fields (a forged role, status, etc.)
  * produce a 400 rather than being ignored.
  */
-export function parseBody<T>(event: APIGatewayProxyEventV2, schema: z.ZodType<T>): T {
+export function parseBody<T>(event: APIGatewayProxyEventV2, schema: z.ZodType<T>, maxBytes: number = MAX_BODY_BYTES): T {
   const raw = event.body;
   if (raw === undefined || raw === null || raw === "") {
     throw new HttpError(400, "INVALID_REQUEST", "A JSON request body is required");
   }
   const text = event.isBase64Encoded ? Buffer.from(raw, "base64").toString("utf8") : raw;
-  if (Buffer.byteLength(text, "utf8") > MAX_BODY_BYTES) {
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
     throw new HttpError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
   }
   let parsed: unknown;

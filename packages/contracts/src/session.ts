@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { IncidentConfigSchema, ScenarioPublicSchema } from "./scenario.js";
 import { ConfigRevisionViewSchema, CurrentEvidenceSchema, TestRunViewSchema } from "./testRun.js";
+import { SubmissionSummarySchema, SubmissionViewSchema } from "./submission.js";
 
-export const SessionPhaseSchema = z.enum(["NOT_STARTED", "INVESTIGATING"]);
+export const SessionPhaseSchema = z.enum(["NOT_STARTED", "INVESTIGATING", "SUBMITTED"]);
 export type SessionPhase = z.infer<typeof SessionPhaseSchema>;
 
 export const ViewedSchema = z.object({
@@ -39,6 +40,12 @@ export const SessionViewSchema = z.object({
   /** Result of the latest run for the CURRENT config, or NONE. */
   currentEvidence: CurrentEvidenceSchema,
   activeTestRunId: z.string().nullable(),
+  /** 1 for the first attempt; a revision request opens attempt N+1 as a NEW session. */
+  attemptNumber: z.number().int().positive(),
+  /** This attempt's frozen submission (with its review outcome), or null before submitting. */
+  submission: SubmissionViewSchema.nullable(),
+  /** Every attempt on this assignment, newest first (read-only history). */
+  submissions: z.array(SubmissionSummarySchema),
   viewed: ViewedSchema,
   startedAt: z.string().nullable(),
   updatedAt: z.string(),
@@ -83,3 +90,11 @@ export type SaveConfigResponse = z.infer<typeof SaveConfigResponseSchema>;
 /** Returned when a run is requested and when it is polled. */
 export const TestRunResponseSchema = z.object({ testRun: TestRunViewSchema, session: SessionViewSchema });
 export type TestRunResponse = z.infer<typeof TestRunResponseSchema>;
+
+export const SubmitReportResponseSchema = z.object({
+  submission: SubmissionViewSchema,
+  session: SessionViewSchema,
+  /** false when an identical retry (same Idempotency-Key and content) returned the original. */
+  created: z.boolean(),
+});
+export type SubmitReportResponse = z.infer<typeof SubmitReportResponseSchema>;

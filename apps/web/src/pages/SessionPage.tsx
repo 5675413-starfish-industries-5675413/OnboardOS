@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { SessionView, TestRunView } from "@onboardos/contracts";
+import type { SessionView, SubmissionView, TestRunView } from "@onboardos/contracts";
+import { REPORT_FIELD_MAX } from "@onboardos/contracts";
 import {
   ApiError,
   fetchSession,
@@ -8,14 +9,24 @@ import {
   postSessionAction,
   requestTestRun,
   saveConfig,
+  startAssignment,
+  submitReport,
 } from "../lib/api.js";
 import {
+  EMPTY_REPORT,
+  REPORT_FIELDS,
   actionForTab,
+  assignmentStatusLabel,
   canRunTests,
   describeApiError,
+  evidenceNote,
   parseTimeoutInput,
   runBadge,
   shortHash,
+  submissionReadiness,
+  toneClass,
+  validateReport,
+  type ReportDraft,
   type Tab,
 } from "../lib/views.js";
 
@@ -47,6 +58,13 @@ export function SessionPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [running, setRunning] = useState(false);
+  const [report, setReport] = useState<ReportDraft>(EMPTY_REPORT);
+  const [showReportErrors, setShowReportErrors] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [beginning, setBeginning] = useState(false);
+  // One Idempotency-Key per distinct report: a retry of the same content reuses it, so a lost
+  // response can never create a second submission; editing the report starts a new key.
+  const idempotencyKey = useRef<string | null>(null);
 
   const handleAuth = useCallback(
     (err: unknown): boolean => {
@@ -136,6 +154,66 @@ export function SessionPage() {
     }
   }
 
+  function onReportChange(key: keyof ReportDraft, value: string) {
+    idempotencyKey.current = null;
+    setReport((r) => ({ ...r, [key]: value }));
+  }
+
+  async function onSubmitReport() {
+    if (!session || submitting || busy || running) return;
+    const check = validateReport(report);
+    const ready = submissionReadiness(session);
+    if (!check.ok) {
+      setShowReportErrors(true);
+      return;
+    }
+    if (!ready.ready) return;
+    idempotencyKey.current ??= crypto.randomUUID();
+    setSubmitting(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await submitReport(
+        session.sessionId,
+        {
+          expectedStateVersion: session.stateVersion,
+          testRunId: ready.run.testRunId,
+          configRevision: session.configRevision,
+          configHash: session.configHash,
+          report: check.report,
+        },
+        idempotencyKey.current,
+      );
+      setSession(r.session);
+      setNotice(r.created ? "Submitted for review. Your evidence is now frozen." : "That report was already submitted; showing the original.");
+    } catch (err) {
+      if (handleAuth(err)) return;
+      setError(describeApiError(err));
+      // Whatever happened, show what the server actually holds.
+      try {
+        setSession(await fetchSession(session.sessionId));
+      } catch (reloadErr) {
+        if (!handleAuth(reloadErr)) setError(describeApiError(reloadErr));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function onBeginNextAttempt() {
+    if (!session || beginning) return;
+    setBeginning(true);
+    setError(null);
+    try {
+      const r = await startAssignment(session.assignmentId);
+      navigate(`/sessions/${encodeURIComponent(r.session.sessionId)}`);
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeApiError(err));
+    } finally {
+      setBeginning(false);
+    }
+  }
+
   async function onRunTests() {
     if (!session || !canRunTests(session, busy || running)) return;
     setRunning(true);
@@ -218,7 +296,7 @@ export function SessionPage() {
         </div>
         <p>{scenario.summary}</p>
         <p className="muted">
-          <span className="pill pill-progress">{session.phase === "INVESTIGATING" ? "Investigating" : session.phase}</span>{" "}
+          <span className="pill pill-progress">{session.phase === "INVESTIGATING" ? "Investigating" : session.phase === "SUBMITTED" ? "Submitted" : session.phase}</span>{" "}
           Server state version {session.stateVersion}
           {session.startedAt && <> · started {new Date(session.startedAt).toLocaleString()}</>}
         </p>
@@ -261,15 +339,39 @@ export function SessionPage() {
         draft={draft}
         onDraft={setDraft}
         onSave={() => void onSaveConfig()}
-        disabled={busy || running}
+        disabled={busy || running || submitting || session.phase !== "INVESTIGATING"}
+        locked={session.phase !== "INVESTIGATING"}
       />
 
       <TestRunsCard
         session={session}
         running={running}
-        canRun={canRunTests(session, busy || running)}
+        canRun={canRunTests(session, busy || running || submitting)}
         onRun={() => void onRunTests()}
       />
+
+      {session.phase === "INVESTIGATING" ? (
+        <ReportCard
+          session={session}
+          report={report}
+          showErrors={showReportErrors}
+          submitting={submitting}
+          disabled={busy || running}
+          onChange={onReportChange}
+          onSubmit={() => void onSubmitReport()}
+        />
+      ) : (
+        session.submission && (
+          <SubmissionCard
+            session={session}
+            submission={session.submission}
+            beginning={beginning}
+            onBegin={() => void onBeginNextAttempt()}
+          />
+        )
+      )}
+
+      <PreviousAttempts session={session} />
     </div>
   );
 }
@@ -355,6 +457,7 @@ function ConfigCard(props: {
   onDraft: (v: string) => void;
   onSave: () => void;
   disabled: boolean;
+  locked: boolean;
 }) {
   const { session, draft } = props;
   const parsed = parseTimeoutInput(draft);
@@ -400,7 +503,9 @@ function ConfigCard(props: {
         )}
       </form>
       <p className="muted">
-        Each save creates a new numbered revision that is never edited afterwards. The server validates the value.
+        {props.locked
+          ? "This attempt has been submitted, so the configuration is locked. Your earlier revisions remain below."
+          : "Each save creates a new numbered revision that is never edited afterwards. The server validates the value."}
       </p>
       {session.revisions.length > 0 && (
         <table className="data">
@@ -513,5 +618,189 @@ function RunCard({ run }: { run: TestRunView }) {
         </>
       )}
     </section>
+  );
+}
+
+function ReportCard(props: {
+  session: SessionView;
+  report: ReportDraft;
+  showErrors: boolean;
+  submitting: boolean;
+  disabled: boolean;
+  onChange: (key: keyof ReportDraft, value: string) => void;
+  onSubmit: () => void;
+}) {
+  const { session, report } = props;
+  const readiness = submissionReadiness(session);
+  const check = validateReport(report);
+  const errors = check.ok ? {} : check.errors;
+  const blocked = !readiness.ready;
+  return (
+    <div className="card">
+      <h2>Incident report</h2>
+      <p className="muted">
+        Attempt {session.attemptNumber}. Submitting freezes your report and the evidence below for your manager. After you
+        submit, this attempt cannot be edited.
+      </p>
+
+      <div className="run" data-testid="submission-evidence">
+        <strong>Evidence that will be submitted</strong>
+        {readiness.ready ? (
+          <>
+            <p>
+              Configuration revision {session.configRevision === 0 ? "0 (baseline)" : session.configRevision} ·{" "}
+              <span className="mono">{shortHash(session.configHash)}</span> · {session.config.request_timeout_ms} ms
+            </p>
+            <p>
+              Latest test run:{" "}
+              <span className={toneClass(readiness.run.status === "PASSED" ? "ok" : "bad")}>
+                {readiness.run.status === "PASSED" ? "Passed" : "Failed"}
+              </span>{" "}
+              {readiness.run.passedCount} of {readiness.run.totalCount} checks, executed on AWS Lambda.
+            </p>
+            <p className={readiness.run.status === "FAILED" ? "field-error" : "muted"}>
+              {evidenceNote(readiness.run.status as "PASSED" | "FAILED")}
+            </p>
+          </>
+        ) : (
+          <p className="muted" role="status" data-testid="submission-blocked">{readiness.reason}</p>
+        )}
+      </div>
+
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onSubmit();
+        }}
+        noValidate
+      >
+        {REPORT_FIELDS.map(({ key, label, hint }) => {
+          const id = `report-${key}`;
+          const err = props.showErrors ? errors[key] : undefined;
+          return (
+            <div key={key} style={{ marginBottom: ".9rem" }}>
+              <label htmlFor={id}>{label}</label>
+              <textarea
+                id={id}
+                rows={4}
+                value={report[key]}
+                maxLength={REPORT_FIELD_MAX + 200}
+                onChange={(e) => props.onChange(key, e.target.value)}
+                aria-invalid={err ? true : undefined}
+                aria-describedby={`${id}-hint${err ? ` ${id}-error` : ""}`}
+                disabled={props.disabled || props.submitting}
+              />
+              <div id={`${id}-hint`} className="muted">
+                {hint} ({report[key].trim().length}/{REPORT_FIELD_MAX})
+              </div>
+              {err && <div id={`${id}-error`} className="field-error" role="alert">{err}</div>}
+            </div>
+          );
+        })}
+        <button className="btn" type="submit" disabled={props.disabled || props.submitting || blocked}>
+          {props.submitting ? "Submitting…" : "Submit for review"}
+        </button>
+        {blocked && <span className="muted"> {readiness.reason}</span>}
+      </form>
+    </div>
+  );
+}
+
+function SubmissionCard(props: {
+  session: SessionView;
+  submission: SubmissionView;
+  beginning: boolean;
+  onBegin: () => void;
+}) {
+  const { submission: sub, session } = props;
+  const review = sub.review;
+  const status = review ? (review.decision === "APPROVE" ? "APPROVED" : "REVISION_REQUESTED") : "AWAITING_REVIEW";
+  const tone = review ? (review.decision === "APPROVE" ? "ok" : "bad") : "warn";
+  return (
+    <div className="card" data-testid="submission-card">
+      <div className="row">
+        <h2>Attempt {sub.attemptNumber}: submitted</h2>
+        <span className={toneClass(tone)}>{assignmentStatusLabel(status)}</span>
+      </div>
+      <p className="muted">Submitted {new Date(sub.submittedAt).toLocaleString()}. This attempt is frozen and cannot be edited.</p>
+
+      {!review && (
+        <div className="info" role="status">
+          Waiting for your manager. {sub.evaluation.message}
+        </div>
+      )}
+      {review?.decision === "APPROVE" && (
+        <div className="banner banner-aws" role="status" data-testid="review-outcome">
+          <strong>Approved</strong> by {review.reviewerDisplayName} on {new Date(review.decidedAt).toLocaleString()}.
+          {review.feedback && <div className="prewrap">{review.feedback}</div>}
+        </div>
+      )}
+      {review?.decision === "REQUEST_REVISION" && (
+        <div className="banner banner-warn" role="status" data-testid="review-outcome">
+          <strong>Revision requested</strong> by {review.reviewerDisplayName} on {new Date(review.decidedAt).toLocaleString()}.
+          <div className="prewrap" style={{ marginTop: ".4rem" }}>{review.feedback}</div>
+          <button className="btn" style={{ marginTop: ".7rem" }} onClick={props.onBegin} disabled={props.beginning}>
+            {props.beginning ? "Opening…" : `Begin attempt ${session.attemptNumber + 1}`}
+          </button>
+        </div>
+      )}
+
+      <h3 style={{ fontSize: ".95rem", margin: ".9rem 0 .25rem" }}>Evidence submitted</h3>
+      <p>
+        Configuration revision {sub.config.revision} · <span className="mono">{shortHash(sub.config.configHash)}</span> ·{" "}
+        {sub.config.snapshot.request_timeout_ms} ms. Test run{" "}
+        <span className={toneClass(sub.testRun.status === "PASSED" ? "ok" : "bad")}>
+          {sub.testRun.status === "PASSED" ? "Passed" : "Failed"}
+        </span>{" "}
+        {sub.testRun.passedCount} of {sub.testRun.totalCount}
+        {sub.testRun.executor && (
+          <> · executed on AWS Lambda ({sub.testRun.executor.region}), runner request{" "}
+            <span className="mono">{sub.testRun.executor.runnerRequestId}</span></>
+        )}
+        .
+      </p>
+      {REPORT_FIELDS.map(({ key, label }) => (
+        <div key={key}>
+          <h3 style={{ fontSize: ".95rem", margin: ".9rem 0 .25rem" }}>{label}</h3>
+          <div className="prewrap">{sub.report[key]}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function PreviousAttempts({ session }: { session: SessionView }) {
+  const earlier = session.submissions.filter((s) => s.attemptNumber !== session.attemptNumber);
+  if (earlier.length === 0) return null;
+  return (
+    <div className="card" data-testid="previous-attempts">
+      <h2>Earlier attempts</h2>
+      <p className="muted">These are frozen and cannot change.</p>
+      <table className="data">
+        <caption className="sr-only">Earlier attempts and manager decisions</caption>
+        <thead>
+          <tr><th scope="col">Attempt</th><th scope="col">Submitted</th><th scope="col">Test result</th><th scope="col">Manager decision</th></tr>
+        </thead>
+        <tbody>
+          {earlier.map((s) => (
+            <tr key={s.submissionId}>
+              <td>{s.attemptNumber}</td>
+              <td>{new Date(s.submittedAt).toLocaleString()}</td>
+              <td>{s.testStatus === "PASSED" ? "Passed" : "Failed"} (revision {s.configRevision})</td>
+              <td>
+                {s.review ? (
+                  <>
+                    <strong>{s.review.decision === "APPROVE" ? "Approved" : "Revision requested"}</strong>
+                    {s.review.feedback && <div className="prewrap muted">{s.review.feedback}</div>}
+                  </>
+                ) : (
+                  <span className="muted">Awaiting review</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

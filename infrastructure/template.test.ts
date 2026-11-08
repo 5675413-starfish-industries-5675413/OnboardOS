@@ -105,6 +105,9 @@ describe("API routes and authorization", () => {
     "PUT /v1/sessions/{sessionId}/config",
     "POST /v1/sessions/{sessionId}/test-runs",
     "GET /v1/sessions/{sessionId}/test-runs/{runId}",
+    "POST /v1/sessions/{sessionId}/submissions",
+    "GET /v1/reviews/{submissionId}",
+    "POST /v1/reviews/{submissionId}/decision",
   ];
 
   it("declares exactly the intended routes: nothing extra can be added silently", () => {
@@ -139,6 +142,8 @@ describe("API routes and authorization", () => {
     const http = resource("OnboardOSHttpApi");
     expect(listUnder(http, "AllowOrigins")).toEqual(["http://localhost:5173"]);
     expect(listUnder(http, "AllowHeaders")).toContain("Authorization");
+    // The browser sends Idempotency-Key on report submission; without this the preflight would fail.
+    expect([...listUnder(http, "AllowHeaders")].sort()).toEqual(["Authorization", "Content-Type", "Idempotency-Key"]);
     expect(http).not.toMatch(/"\*"|'\*'/);
   });
 
@@ -251,9 +256,19 @@ describe("IAM least privilege", () => {
       expect(st.resources).not.toContain("OnboardOSCoreTable");
     });
 
+    it("lets the API read Events only by Query on the table itself (the evidence timeline): no Scan, Get, index or write", () => {
+      const st = byId("EventsRead");
+      expect(st.actions).toEqual(["dynamodb:Query"]);
+      expect(st.resources).toContain("!GetAtt OnboardOSEventsTable.Arn");
+      expect(st.resources).not.toContain("OnboardOSCoreTable");
+      expect(st.resources).not.toContain("/index/");
+      // The Events table has no secondary index, so there is nothing for a wildcard to match.
+      expect(resource("OnboardOSEventsTable")).not.toContain("GlobalSecondaryIndexes");
+    });
+
     it("has no other DynamoDB statement, and the complete action set is exactly the four used", () => {
       expect(stmts().map((x) => x.sid).filter((sid) => !/Logging|Logs/i.test(sid)).sort())
-        .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend", "InvokeScenarioRunner"]);
+        .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend", "EventsRead", "InvokeScenarioRunner"]);
       const all = [...resource(role).matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
       expect([...new Set(all)].sort()).toEqual([
         "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem",
@@ -273,7 +288,7 @@ describe("IAM least privilege", () => {
       expect([...new Set(lambdaActions)]).toEqual(["lambda:InvokeFunction"]);
     });
 
-    it("never grants Scan, Delete, Batch, ConditionCheck, table administration or Events reads", () => {
+    it("never grants Scan, Delete, Batch, ConditionCheck, table administration or any Events write other than append", () => {
       const text = resource(role);
       for (const forbidden of ["Scan", "DeleteItem", "BatchWriteItem", "BatchGetItem", "ConditionCheckItem", "DescribeTable", "CreateTable", "DeleteTable", "UpdateTable", "dynamodb:*"]) {
         expect(text, forbidden).not.toContain(forbidden);

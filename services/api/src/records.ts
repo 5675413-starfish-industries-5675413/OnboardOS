@@ -21,13 +21,24 @@ import {
   ScenarioIdSchema,
   SessionPhaseSchema,
   SessionViewSchema,
+  FrozenTestRunSchema,
+  IncidentReportSchema,
+  EvaluationStatusSchema,
+  ReviewDecisionSchema,
+  SubmissionViewSchema,
+  SubmissionSummarySchema,
   TestCaseResultSchema,
   TestRunViewSchema,
   ConfigRevisionViewSchema,
   UserSubSchema,
   ViewedSchema,
   type AssignmentView,
+  type FrozenTestRun,
+  type IncidentReport,
+  type ReviewDecision,
   type SessionView,
+  type SubmissionSummary,
+  type SubmissionView,
   type TestRunView,
 } from "@onboardos/contracts";
 import {
@@ -40,7 +51,7 @@ import {
   type RunnerCase,
   type WorkplaceState,
 } from "@onboardos/scenario-engine";
-import { ASSIGNMENT_ID_PATTERN, SESSION_ID_PATTERN } from "./ids.js";
+import { ASSIGNMENT_ID_PATTERN, SESSION_ID_PATTERN, SUBMISSION_ID_PATTERN, submissionIdFor } from "./ids.js";
 
 // ---------------------------------------------------------------------------
 // Key builders (single source of truth for the access patterns in docs/04)
@@ -57,6 +68,21 @@ export const keys = {
   }),
   /** One test run. Run ids start with a zero-padded run number, so key order == creation order. */
   testRun: (sessionId: string, testRunId: string) => ({ PK: `SESSION#${sessionId}`, SK: `TEST#${testRunId}` }),
+  /**
+   * A frozen submission and its (single) decision live in the ASSIGNMENT's partition, one
+   * slot per attempt. Create-if-absent on these keys is what makes them immutable and
+   * what makes a second decision impossible. (Doc 04 sketches SESSION#/SUBMISSION#; see ADR-029.)
+   */
+  submission: (assignmentId: string, attempt: number) => ({
+    PK: `ASSIGN#${assignmentId}`,
+    SK: `SUBMISSION#${String(attempt).padStart(2, "0")}`,
+  }),
+  decision: (assignmentId: string, attempt: number) => ({
+    PK: `ASSIGN#${assignmentId}`,
+    SK: `DECISION#${String(attempt).padStart(2, "0")}`,
+  }),
+  /** Persistent idempotency ledger for report submission, scoped to the session (and so to the employee). */
+  submitLedger: (sessionId: string, key: string) => ({ PK: `SESSION#${sessionId}`, SK: `IDEM#SUBMIT#${key}` }),
   event: (sessionId: string, sequence: number) => ({
     PK: `SESSION#${sessionId}`,
     SK: `SEQ#${String(sequence).padStart(10, "0")}`,
@@ -137,6 +163,9 @@ const AssignmentRecordSchema = z
     createdAt: z.string(),
     startedAt: z.string().nullable(),
     updatedAt: z.string(),
+    // Phase 2D. Absent on records written before it: attempt 1, nothing submitted.
+    attemptNumber: z.number().int().positive().default(1),
+    latestSubmissionId: z.string().regex(SUBMISSION_ID_PATTERN).nullable().default(null),
     GSI1PK: z.string(),
     GSI1SK: z.string(),
     GSI2PK: z.string(),
@@ -184,6 +213,8 @@ export function buildAssignmentRecord(input: {
     createdAt: now,
     startedAt: null,
     updatedAt: now,
+    attemptNumber: 1,
+    latestSubmissionId: null,
     GSI1PK: keys.employeeIndex(organizationId, employeeSub),
     GSI1SK: `ASSIGN#${now}#${assignmentId}`,
     GSI2PK: keys.managerIndex(organizationId, assignedBySub),
@@ -207,6 +238,8 @@ export function toAssignmentView(r: AssignmentRecord, includeEmployee: boolean):
     sessionId: r.sessionId,
     createdAt: r.createdAt,
     startedAt: r.startedAt,
+    attemptNumber: r.attemptNumber,
+    latestSubmissionId: r.latestSubmissionId,
     ...(includeEmployee
       ? { employee: { userSub: r.employeeSub, displayName: r.employeeDisplayName } }
       : {}),
@@ -237,6 +270,10 @@ const WorkplaceStateSchema = z
     configHash: z.string().regex(CONFIG_HASH_PATTERN).optional(),
     testRunsRequested: z.number().int().nonnegative().optional(),
     activeTestRunId: z.string().regex(TEST_RUN_ID_PATTERN).nullable().optional(),
+    // Phase 2D, optional for the same reason.
+    attemptNumber: z.number().int().positive().optional(),
+    submissionId: z.string().regex(SUBMISSION_ID_PATTERN).nullable().optional(),
+    reviewDecision: ReviewDecisionSchema.nullable().optional(),
     viewed: ViewedSchema,
     startedAt: z.string().nullable(),
     updatedAt: z.string(),
@@ -266,6 +303,9 @@ export function parseSessionState(item: unknown): WorkplaceState | null {
     configHash: configHash(d.config),
     testRunsRequested: d.testRunsRequested ?? 0,
     activeTestRunId: d.activeTestRunId ?? null,
+    attemptNumber: d.attemptNumber ?? 1,
+    submissionId: d.submissionId ?? null,
+    reviewDecision: d.reviewDecision ?? null,
     viewed: d.viewed,
     startedAt: d.startedAt,
     updatedAt: d.updatedAt,
@@ -507,15 +547,257 @@ export function toTestRunView(r: TestRunRecord, state: WorkplaceState, scenario:
 }
 
 // ---------------------------------------------------------------------------
+// Frozen submissions, decisions and the idempotency ledger
+// ---------------------------------------------------------------------------
+
+export const MANIFEST_VERSION = 1;
+
+export const EVALUATION_NOT_CONFIGURED = {
+  status: "NOT_CONFIGURED" as const,
+  message:
+    "AI-assisted evaluation is not configured for this deployment. A human manager reviews the frozen evidence directly.",
+};
+
+const SubmissionRecordSchema = z
+  .looseObject({
+    PK: z.string(),
+    SK: z.string(),
+    entityType: z.literal("SUBMISSION"),
+    submissionId: z.string().regex(SUBMISSION_ID_PATTERN),
+    attemptNumber: z.number().int().positive(),
+    sessionId: z.string().regex(SESSION_ID_PATTERN),
+    assignmentId: z.string().regex(ASSIGNMENT_ID_PATTERN),
+    organizationId: z.string(),
+    employeeSub: UserSubSchema,
+    scenarioId: ScenarioIdSchema,
+    scenarioVersion: z.number().int().positive(),
+    rubricVersion: z.number().int().positive(),
+    manifestVersion: z.number().int().positive(),
+    submittedAt: z.string(),
+    report: IncidentReportSchema,
+    config: z.object({
+      revision: z.number().int().nonnegative(),
+      configHash: z.string().regex(CONFIG_HASH_PATTERN),
+      snapshot: IncidentConfigSchema,
+    }),
+    testRun: FrozenTestRunSchema,
+    investigation: z.object({ ticketOpened: z.boolean(), runbookOpened: z.boolean(), diagnosticsOpened: z.boolean() }),
+    evidence: z.object({ eventSequence: z.number().int().positive() }),
+    evaluation: z.object({ status: EvaluationStatusSchema, message: z.string() }),
+  })
+  .refine(
+    (r) => {
+      const k = keys.submission(r.assignmentId, r.attemptNumber);
+      if (r.PK !== k.PK || r.SK !== k.SK) return false;
+      if (r.submissionId !== submissionIdFor(r.assignmentId, r.attemptNumber)) return false;
+      // The frozen evidence must be internally consistent: hash <-> snapshot <-> run.
+      if (r.config.configHash !== configHash(r.config.snapshot)) return false;
+      const t = r.testRun;
+      if (t.configHash !== r.config.configHash || t.configRevision !== r.config.revision) return false;
+      if (configHash(t.configSnapshot) !== t.configHash) return false;
+      const passes = t.cases.filter((c) => c.status === "PASS").length;
+      if (t.passedCount !== passes || t.totalCount !== t.cases.length || t.totalCount === 0) return false;
+      if (t.executor === null || t.completedAt === null) return false;
+      return t.status === "PASSED" ? passes === t.totalCount : t.status === "FAILED" ? passes < t.totalCount : false;
+    },
+    { message: "submission is internally inconsistent" },
+  );
+export type SubmissionRecord = z.infer<typeof SubmissionRecordSchema>;
+
+export function parseSubmission(item: unknown): SubmissionRecord | null {
+  const parsed = SubmissionRecordSchema.safeParse(item);
+  return parsed.success ? parsed.data : null;
+}
+
+/** The terminal run exactly as it will be frozen: the view the employee had, minus live currentness flags. */
+export function freezeTestRun(run: TestRunRecord): FrozenTestRun {
+  return FrozenTestRunSchema.parse({
+    testRunId: run.testRunId,
+    status: run.status,
+    configRevision: run.configRevision,
+    configHash: run.configHash,
+    configSnapshot: run.configSnapshot,
+    suiteVersion: run.suiteVersion,
+    createdAt: run.createdAt,
+    completedAt: run.completedAt,
+    cases: run.cases,
+    passedCount: run.passedCount,
+    totalCount: run.totalCount,
+    executor: run.executor ? { kind: "AWS_LAMBDA", ...run.executor } : null,
+    errorCode: run.errorCode,
+    errorMessage: run.errorMessage,
+  });
+}
+
+/**
+ * Build the immutable submission from AUTHORITATIVE inputs only: the engine's next
+ * state, the server-held run record and the published scenario. The employee's
+ * request contributes nothing here except the report text.
+ */
+export function buildSubmissionRecord(input: {
+  next: WorkplaceState;
+  scenario: PublishedScenario;
+  run: TestRunRecord;
+  report: IncidentReport;
+  submissionId: string;
+  now: string;
+}): SubmissionRecord {
+  const { next, scenario, run, report, submissionId, now } = input;
+  return {
+    ...keys.submission(next.assignmentId, next.attemptNumber),
+    entityType: "SUBMISSION",
+    submissionId,
+    attemptNumber: next.attemptNumber,
+    sessionId: next.sessionId,
+    assignmentId: next.assignmentId,
+    organizationId: next.organizationId,
+    employeeSub: next.employeeSub,
+    scenarioId: next.scenarioId,
+    scenarioVersion: next.scenarioVersion,
+    rubricVersion: scenario.rubricVersion,
+    manifestVersion: MANIFEST_VERSION,
+    submittedAt: now,
+    report: { ...report },
+    config: { revision: next.configRevision, configHash: next.configHash, snapshot: { ...next.config } },
+    testRun: freezeTestRun(run),
+    investigation: {
+      ticketOpened: next.viewed.ticket,
+      runbookOpened: next.viewed.runbook,
+      diagnosticsOpened: next.viewed.diagnostics,
+    },
+    // The submission event is the last event of the evidence timeline.
+    evidence: { eventSequence: next.stateVersion },
+    evaluation: { ...EVALUATION_NOT_CONFIGURED },
+  };
+}
+
+const DecisionRecordSchema = z
+  .looseObject({
+    PK: z.string(),
+    SK: z.string(),
+    entityType: z.literal("REVIEW_DECISION"),
+    submissionId: z.string().regex(SUBMISSION_ID_PATTERN),
+    assignmentId: z.string().regex(ASSIGNMENT_ID_PATTERN),
+    attemptNumber: z.number().int().positive(),
+    sessionId: z.string().regex(SESSION_ID_PATTERN),
+    organizationId: z.string(),
+    decision: ReviewDecisionSchema,
+    feedback: z.string().nullable(),
+    reviewerSub: UserSubSchema,
+    reviewerDisplayName: z.string(),
+    decidedAt: z.string(),
+  })
+  .refine(
+    (r) => {
+      const k = keys.decision(r.assignmentId, r.attemptNumber);
+      return r.PK === k.PK && r.SK === k.SK && r.submissionId === submissionIdFor(r.assignmentId, r.attemptNumber);
+    },
+    { message: "decision keys do not match content" },
+  );
+export type DecisionRecord = z.infer<typeof DecisionRecordSchema>;
+
+export function parseDecision(item: unknown): DecisionRecord | null {
+  const parsed = DecisionRecordSchema.safeParse(item);
+  return parsed.success ? parsed.data : null;
+}
+
+export function buildDecisionRecord(input: {
+  submission: SubmissionRecord;
+  decision: ReviewDecision;
+  feedback: string | null;
+  reviewerSub: string;
+  reviewerDisplayName: string;
+  now: string;
+}): DecisionRecord {
+  const { submission: sub } = input;
+  return {
+    ...keys.decision(sub.assignmentId, sub.attemptNumber),
+    entityType: "REVIEW_DECISION",
+    submissionId: sub.submissionId,
+    assignmentId: sub.assignmentId,
+    attemptNumber: sub.attemptNumber,
+    sessionId: sub.sessionId,
+    organizationId: sub.organizationId,
+    decision: input.decision,
+    feedback: input.feedback,
+    reviewerSub: input.reviewerSub,
+    reviewerDisplayName: input.reviewerDisplayName,
+    decidedAt: input.now,
+  };
+}
+
+const LedgerRecordSchema = z.looseObject({
+  PK: z.string(),
+  SK: z.string().startsWith("IDEM#SUBMIT#"),
+  entityType: z.literal("IDEMPOTENCY"),
+  requestHash: z.string().regex(/^[0-9a-f]{64}$/),
+  submissionId: z.string().regex(SUBMISSION_ID_PATTERN),
+  createdAt: z.string(),
+});
+export type LedgerRecord = z.infer<typeof LedgerRecordSchema>;
+
+export function parseLedger(item: unknown): LedgerRecord | null {
+  const parsed = LedgerRecordSchema.safeParse(item);
+  return parsed.success ? parsed.data : null;
+}
+
+export function buildLedgerRecord(sessionId: string, key: string, requestHash: string, submissionId: string, now: string): LedgerRecord {
+  return { ...keys.submitLedger(sessionId, key), entityType: "IDEMPOTENCY", requestHash, submissionId, createdAt: now };
+}
+
+/** Public review outcome (never exposes the reviewer's subject id). */
+function reviewOutcome(d: DecisionRecord | undefined | null) {
+  return d
+    ? { decision: d.decision, feedback: d.feedback, decidedAt: d.decidedAt, reviewerDisplayName: d.reviewerDisplayName }
+    : null;
+}
+
+export function toSubmissionView(sub: SubmissionRecord, decision: DecisionRecord | null | undefined): SubmissionView {
+  return SubmissionViewSchema.parse({
+    submissionId: sub.submissionId,
+    attemptNumber: sub.attemptNumber,
+    sessionId: sub.sessionId,
+    assignmentId: sub.assignmentId,
+    organizationId: sub.organizationId,
+    scenarioId: sub.scenarioId,
+    scenarioVersion: sub.scenarioVersion,
+    rubricVersion: sub.rubricVersion,
+    manifestVersion: sub.manifestVersion,
+    submittedAt: sub.submittedAt,
+    report: sub.report,
+    config: sub.config,
+    testRun: sub.testRun,
+    investigation: sub.investigation,
+    evidence: sub.evidence,
+    evaluation: sub.evaluation,
+    review: reviewOutcome(decision),
+  });
+}
+
+export function toSubmissionSummary(sub: SubmissionRecord, decision: DecisionRecord | null | undefined): SubmissionSummary {
+  return SubmissionSummarySchema.parse({
+    submissionId: sub.submissionId,
+    attemptNumber: sub.attemptNumber,
+    submittedAt: sub.submittedAt,
+    testStatus: sub.testRun.status,
+    configRevision: sub.config.revision,
+    review: reviewOutcome(decision),
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Session view
 // ---------------------------------------------------------------------------
 
-/** The bounded revision and run history that accompanies a session. Newest first. */
+/** The bounded revision, run and submission history that accompanies a session. Newest first. */
 export interface SessionHistory {
   revisions: ConfigRevisionRecord[];
   runs: TestRunRecord[];
+  /** Every attempt's frozen submission on this assignment. */
+  submissions: SubmissionRecord[];
+  decisions: DecisionRecord[];
 }
-export const EMPTY_HISTORY: SessionHistory = { revisions: [], runs: [] };
+export const EMPTY_HISTORY: SessionHistory = { revisions: [], runs: [], submissions: [], decisions: [] };
 
 /** Client projection of a session. Parsing through the contract strips anything not public. */
 export function toSessionView(
@@ -525,6 +807,8 @@ export function toSessionView(
 ): SessionView {
   const testRuns = history.runs.map((r) => toTestRunView(r, state, scenario));
   const latestCurrent = testRuns.find((r) => r.current);
+  const decisionFor = (id: string) => history.decisions.find((d) => d.submissionId === id);
+  const own = state.submissionId ? history.submissions.find((x) => x.submissionId === state.submissionId) : undefined;
   return SessionViewSchema.parse({
     sessionId: state.sessionId,
     assignmentId: state.assignmentId,
@@ -544,6 +828,9 @@ export function toSessionView(
       ? { status: latestCurrent.status, testRunId: latestCurrent.testRunId }
       : { status: "NONE", testRunId: null },
     activeTestRunId: state.activeTestRunId,
+    attemptNumber: state.attemptNumber,
+    submission: own ? toSubmissionView(own, decisionFor(own.submissionId)) : null,
+    submissions: history.submissions.map((x) => toSubmissionSummary(x, decisionFor(x.submissionId))),
     viewed: state.viewed,
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,

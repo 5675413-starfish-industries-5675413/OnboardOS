@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  OnboardOS - Infrastructure Phases 1, 2A, 2B and 2C.
+  OnboardOS - Infrastructure Phases 1, 2A, 2B, 2C and 2D.
   HTTP API (GET /health public; all /v1 routes JWT-protected), API Lambda,
   private smoke-test Lambda, private scenario-runner Lambda (invoked only by the
   API function), Cognito User Pool + SPA client, JWT authorizer, DynamoDB Core +
@@ -182,7 +182,7 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: "$default"
-      Description: OnboardOS HTTP API - Phase 2C
+      Description: OnboardOS HTTP API - Phase 2D
       Auth:
         # Default authorizer for all routes that declare Auth: JwtAuthorizer
         Authorizers:
@@ -205,6 +205,7 @@ Resources:
         AllowHeaders:
           - Content-Type
           - Authorization
+          - Idempotency-Key
         MaxAge: 300
 
   # ── API Lambda ────────────────────────────────────────────────────────────
@@ -212,7 +213,7 @@ Resources:
   OnboardOSApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: OnboardOS API - HTTP routing handler (Phase 2C)
+      Description: OnboardOS API - HTTP routing handler (Phase 2D)
       Handler: handler.httpHandler
       CodeUri: ../services/api/
       Role: !GetAtt OnboardOSApiRole.Arn
@@ -315,6 +316,32 @@ Resources:
             Method: GET
             Auth:
               Authorizer: JwtAuthorizer
+        # Phase 2D routes: JWT-protected; the Lambda authorizes ownership (employee) or the
+        # assigner/reviewer relationship (manager, org admin) against DynamoDB on every call.
+        ApiSubmitReport:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/submissions
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetReview:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/reviews/{submissionId}
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiDecideReview:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/reviews/{submissionId}/decision
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -380,13 +407,13 @@ Resources:
 
   # ── IAM: API execution role ───────────────────────────────────────────────
   # Phase 2C adds lambda:InvokeFunction on the scenario runner ONLY.
-  # Item access + bounded queries on Core, append-only PutItem on Events.
+  # Item access + bounded queries on Core, append-only PutItem and a bounded Query on Events.
   # No Scan, no Delete, no Batch, no Events reads. See each statement below.
 
   OnboardOSApiRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Execution role for OnboardOS API Lambda (Phase 2C)
+      Description: Execution role for OnboardOS API Lambda (Phase 2D)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -444,12 +471,21 @@ Resources:
                   - !GetAtt OnboardOSCoreTable.Arn
                   - !Sub "${OnboardOSCoreTable.Arn}/index/GSI1"
                   - !Sub "${OnboardOSCoreTable.Arn}/index/GSI2"
-              # Append-only event history: the API can create events but never read,
-              # modify or delete them.
+              # Append-only event history: the API can create events but never modify or
+              # delete them.
               - Sid: EventsAppend
                 Effect: Allow
                 Action:
                   - dynamodb:PutItem
+                Resource:
+                  - !GetAtt OnboardOSEventsTable.Arn
+              # Phase 2D: read one session's events for the manager's evidence timeline. Query
+              # only (a single-partition, bounded read), on the table itself: no index exists
+              # on it, no Scan, no Get/Update/Delete.
+              - Sid: EventsRead
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
                 Resource:
                   - !GetAtt OnboardOSEventsTable.Arn
 

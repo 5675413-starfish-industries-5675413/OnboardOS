@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import type { AssignmentView } from "@onboardos/contracts";
 import { listAssignments, startAssignment } from "../lib/api.js";
-import { describeApiError } from "../lib/views.js";
+import { assignmentStatusLabel, assignmentStatusTone, describeApiError, toneClass } from "../lib/views.js";
 
 /**
  * Employee: see assigned incidents, start (or resume) the investigation.
@@ -61,11 +61,12 @@ export function EmployeeView({ orgId }: { orgId: string }) {
         <div key={a.assignmentId} style={{ padding: ".75rem 0", borderTop: "1px solid #e2e8f0" }}>
           <div className="row">
             <strong>{a.scenarioTitle}</strong>
-            <span className={a.status === "IN_PROGRESS" ? "pill pill-progress" : "pill"}>
-              {a.status === "IN_PROGRESS" ? "In progress" : a.status === "ASSIGNED" ? "Assigned" : a.status}
-            </span>
+            <span className={toneClass(assignmentStatusTone(a.status))}>{assignmentStatusLabel(a.status)}</span>
           </div>
-          <div className="muted">Assigned {new Date(a.createdAt).toLocaleString()}</div>
+          <div className="muted">
+            Assigned {new Date(a.createdAt).toLocaleString()}
+            {a.attemptNumber > 1 && <> · attempt {a.attemptNumber}</>}
+          </div>
           {(a.status === "ASSIGNED" || a.status === "IN_PROGRESS") && (
             <button
               className="btn"
@@ -78,6 +79,26 @@ export function EmployeeView({ orgId }: { orgId: string }) {
                 : a.status === "ASSIGNED"
                   ? "Start investigation"
                   : "Resume investigation"}
+            </button>
+          )}
+          {a.sessionId && a.status !== "ASSIGNED" && a.status !== "IN_PROGRESS" && (
+            <button
+              className={a.status === "REVISION_REQUESTED" ? "btn btn-sm" : "btn"}
+              style={{ marginTop: ".6rem", marginRight: ".5rem" }}
+              onClick={() => navigate(`/sessions/${encodeURIComponent(a.sessionId ?? "")}`)}
+              disabled={startingId !== null}
+            >
+              {a.status === "REVISION_REQUESTED" ? "Read the feedback" : "View your submission"}
+            </button>
+          )}
+          {a.status === "REVISION_REQUESTED" && (
+            <button
+              className="btn"
+              style={{ marginTop: ".6rem" }}
+              onClick={() => void onStart(a.assignmentId)}
+              disabled={startingId !== null}
+            >
+              {startingId === a.assignmentId ? "Opening…" : `Begin attempt ${a.attemptNumber + 1}`}
             </button>
           )}
         </div>

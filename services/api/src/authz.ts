@@ -88,3 +88,23 @@ export function canAssign(assigner: Member, employee: Member): boolean {
   if (assigner.role === "manager") return assigner.teamIds.some((t) => employee.teamIds.includes(t));
   return false;
 }
+
+/**
+ * May `reviewer` review work on this assignment? Requires an ACTIVE membership in the
+ * assignment's organization (the caller checks that and passes the Member), and then:
+ *  - an org admin may review any assignment in their organization;
+ *  - a manager only the assignments THEY made (the actual assigner/reviewer relationship);
+ *  - nobody may review their own work, whatever their role;
+ *  - employees never.
+ * Being able to see an id, or a link in the UI, proves nothing: this is checked on every call.
+ */
+export function canReview(
+  reviewer: Member,
+  assignment: { organizationId: string; assignedBySub: string; employeeSub: string },
+): boolean {
+  if (reviewer.status !== "ACTIVE" || reviewer.organizationId !== assignment.organizationId) return false;
+  if (reviewer.userSub === assignment.employeeSub) return false;
+  if (reviewer.role === "org_admin") return true;
+  if (reviewer.role === "manager") return assignment.assignedBySub === reviewer.userSub;
+  return false;
+}

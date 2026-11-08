@@ -186,9 +186,9 @@ describe("data exposure: nothing hidden, internal, or manager-only leaves the AP
     const session = res[9]!.body.session;
     expect(Object.keys(session).sort()).toEqual(
       [
-        "activeTestRunId", "assignmentId", "config", "configHash", "configRevision", "currentEvidence", "organizationId",
+        "activeTestRunId", "assignmentId", "attemptNumber", "config", "configHash", "configRevision", "currentEvidence", "organizationId",
         "phase", "revisions", "scenario", "scenarioId", "scenarioVersion", "sessionId", "startedAt", "stateVersion",
-        "testRuns", "updatedAt", "viewed",
+        "submission", "submissions", "testRuns", "updatedAt", "viewed",
       ].sort(),
     );
     expect(Object.keys(session.scenario).sort()).toEqual(

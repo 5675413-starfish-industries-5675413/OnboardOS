@@ -18,9 +18,13 @@ import type {
   CreateAssignmentResponse,
   ListAssignableEmployeesResponse,
   IncidentConfig,
+  IncidentReport,
   MeResponse,
+  ReviewBundle,
+  ReviewDecision,
   SessionView,
   StartSessionResponse,
+  SubmitReportResponse,
   TestRunResponse,
 } from "@onboardos/contracts";
 import {
@@ -29,9 +33,11 @@ import {
   ListAssignableEmployeesResponseSchema,
   ListAssignmentsResponseSchema,
   MeResponseSchema,
+  ReviewBundleResponseSchema,
   SaveConfigResponseSchema,
   SessionActionResponseSchema,
   StartSessionResponseSchema,
+  SubmitReportResponseSchema,
   TestRunResponseSchema,
 } from "@onboardos/contracts";
 import { config } from "./config.js";
@@ -54,6 +60,7 @@ async function request<T>(
   path: string,
   schema: { parse: (v: unknown) => T },
   body?: unknown,
+  extraHeaders?: Record<string, string>,
 ): Promise<T> {
   const session = getSession();
   if (!session) {
@@ -66,6 +73,7 @@ async function request<T>(
     Authorization: `Bearer ${session.accessToken}`,
   };
   if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (extraHeaders) Object.assign(headers, extraHeaders);
 
   let response: Response;
   try {
@@ -201,4 +209,46 @@ export function requestTestRun(sessionId: string, expectedStateVersion: number):
 /** Poll one run (the server also closes a run that never completed). */
 export function fetchTestRun(sessionId: string, testRunId: string): Promise<TestRunResponse> {
   return request("GET", `/v1/sessions/${seg(sessionId)}/test-runs/${seg(testRunId)}`, TestRunResponseSchema);
+}
+
+// -- submission and review --------------------------------------------------------
+
+/**
+ * Submit the incident report. The body is the report plus the employee's ASSERTION of which
+ * evidence they are looking at (run id, revision, hash) -- the server derives the real evidence
+ * itself and rejects any difference. `idempotencyKey` must be reused for a retry of the SAME
+ * content, so a lost response can never create a second submission.
+ */
+export function submitReport(
+  sessionId: string,
+  input: { expectedStateVersion: number; testRunId: string; configRevision: number; configHash: string; report: IncidentReport },
+  idempotencyKey: string,
+): Promise<SubmitReportResponse> {
+  return request(
+    "POST",
+    `/v1/sessions/${seg(sessionId)}/submissions`,
+    SubmitReportResponseSchema,
+    input,
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
+/** Manager/admin: the read-only evidence bundle for one frozen submission. */
+export async function fetchReview(submissionId: string): Promise<ReviewBundle> {
+  return (await request("GET", `/v1/reviews/${seg(submissionId)}`, ReviewBundleResponseSchema)).review;
+}
+
+/** Manager/admin: record the (final) decision. Feedback is sent only when there is some. */
+export async function postReviewDecision(
+  submissionId: string,
+  decision: ReviewDecision,
+  feedback: string,
+): Promise<ReviewBundle> {
+  const text = feedback.trim();
+  return (
+    await request("POST", `/v1/reviews/${seg(submissionId)}/decision`, ReviewBundleResponseSchema, {
+      decision,
+      ...(text ? { feedback: text } : {}),
+    })
+  ).review;
 }

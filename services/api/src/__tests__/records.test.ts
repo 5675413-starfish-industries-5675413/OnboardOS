@@ -86,7 +86,7 @@ describe("toAssignmentView: the client projection", () => {
   it("employee view: exactly the contract fields, no employee block, no manager identity", () => {
     const v = toAssignmentView(record(), false);
     expect(Object.keys(v).sort()).toEqual(
-      ["assignmentId", "createdAt", "organizationId", "scenarioId", "scenarioTitle", "scenarioVersion", "sessionId", "startedAt", "status"],
+      ["assignmentId", "attemptNumber", "createdAt", "latestSubmissionId", "organizationId", "scenarioId", "scenarioTitle", "scenarioVersion", "sessionId", "startedAt", "status"],
     );
     expect(JSON.stringify(v)).not.toContain(MGR);
   });
