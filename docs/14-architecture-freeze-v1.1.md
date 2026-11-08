@@ -1,6 +1,8 @@
+> **Implementation note (2026-11-08).** This freeze records intended trust boundaries. The SAM template does not create Amazon S3 or AWS Amplify. The public frontend is on Vercel. Bedrock coworker support in this branch is local and is not in the public frontend. Rows below that name S3 or Amplify are unused plans, not deployed services. The early architecture note now lives at `docs/archive/01-architecture-and-aws.md`.
+
 # OnboardOS — Architecture Freeze v1.1
 
-**Status:** Approved *design baseline* for AWS × A10 hackathon, November 7–8, 2026. Not a claim that the infrastructure exists or that tests have passed. This document supersedes conflicting choices in `01-architecture-and-aws.md`, `03-scenario-engine.md`, `04-data-and-api.md`, and `11-decisions.md`. Preserve those documents as explanatory references.
+**Status:** Approved *design baseline* for AWS × A10 hackathon, November 7–8, 2026. Not a claim that the infrastructure exists or that tests have passed. This document supersedes conflicting choices in `docs/archive/01-architecture-and-aws.md`, `03-scenario-engine.md`, `04-data-and-api.md`, and `11-decisions.md`. Preserve those documents as explanatory references.
 
 **Product:** OnboardOS — *Learn the job by doing the job.* A multi-tenant enterprise onboarding SaaS whose primary resource is an authorized, stateful, scenario-bound *workplace session*. Organizations configure an environment; managers assign work; employees execute bounded actions across interconnected simulated tools; a human manager reviews verifiable technical evidence with optional Bedrock assistance.
 

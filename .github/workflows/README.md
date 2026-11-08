@@ -1,5 +1,12 @@
-# CI workflow creation
+# Continuous integration
 
-Do not enable a CI workflow that only appears green because the application packages and tests do not exist. Once root npm scripts are configured, add a GitHub Actions workflow that checks out the repo, sets up the pinned Node.js version, runs `npm ci`, and runs `npm run verify` on pushes to `main` and pull requests.
+This repository does not yet include a GitHub Actions workflow file. Verification is local:
 
-Deploy the hackathon environment through one authorized owner after verifying IAM privileges. Prefer short-lived credentials / scoped roles over static AWS keys in GitHub secrets.
+```sh
+npm ci
+npm run verify
+```
+
+`npm run verify` typechecks the workspaces and scripts, builds the web app, runs the test suite, and runs `sam build`. The SAM step needs the AWS SAM CLI. It does not deploy a stack.
+
+Deploy the hackathon environment through one authorized owner. Prefer short-lived credentials over static AWS keys in GitHub secrets.

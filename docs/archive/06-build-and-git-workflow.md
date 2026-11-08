@@ -1,3 +1,5 @@
+> **Archived on 2026-11-08.** This file is an early planning note. It is not a description of the running product. The current overview is [the project README](../../README.md). The implemented AWS resources are in `infrastructure/template.yaml`.
+
 # 06 — Step-by-step implementation, repository setup, collaboration, and AWS deployment
 
 ## Start from a new repository

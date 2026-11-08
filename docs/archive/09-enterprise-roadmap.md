@@ -1,3 +1,5 @@
+> **Archived on 2026-11-08.** This file is an early planning note. It is not a description of the running product. The current overview is [the project README](../../README.md). The implemented AWS resources are in `infrastructure/template.yaml`.
+
 # 09 — From hackathon prototype to an enterprise SaaS product
 
 ## Stage 0 — Hackathon proof
