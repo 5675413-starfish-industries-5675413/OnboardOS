@@ -1337,3 +1337,51 @@ Every row of the live verification list is NOT RUN: real Cognito login as a mana
 
 ### Real DynamoDB integration test (DESIGN ONLY: not run)
 Purpose: execute the publish transaction, conditional updates and strongly consistent reads against a real table, which the in-memory fake cannot prove. Run it from a script with the operator's credentials (never from the API role), against the Core table, using only disposable keys: organization `it-<12 random hex>` and scenario `inc-104`, so every key is `ORG#it-<hex>` / `COACH...`. Cases: first draft create, stale update refused, first publish with no pointer, second publish with compare-and-set, an identical publish retry, two concurrent publishes (exactly one wins), a draft edited during a publish (cancelled with nothing written), and a pointer behind the versions (refused). Cleanup: the script lists the partition (`Query PK = ORG#it-<hex>`, bounded) and deletes exactly those items, printing the count, and refuses to delete any key not starting with `ORG#it-`. Verify the partition is empty afterwards. Needs `dynamodb:DeleteItem` for the operator, which the API role deliberately lacks.
+
+## Coworker v3 (PREPARED LOCALLY, NOT DEPLOYED, NOT EVALUATED AGAINST A MODEL)
+
+Branch `feat/coworker-v3-quality` (from the M1 commit `ba9a4fd`). See `docs/ai-coworker-architecture.md` section 8.
+
+### The existing M1 change set is stale and must not be executed
+Change set `samcli-deploy1794139934` on stack `onboardos-dev` was built from `ba9a4fd`, so it contains the coworker-v2 prompt and the M1 Studio, including the free-text notes behaviour that a real evaluation showed to be unsafe (the model obeyed a planted note). It is unexecuted and must stay so: do not execute it and do not delete it until a decision is recorded. After v3 is approved it must be REPLACED by a new change set built from the approved v3 commit, and only then deleted by the deployment owner. No new change set has been prepared.
+
+### Two different comparisons (do not confuse them)
+1. **Incremental code change, `ba9a4fd` (M1) to v3.** Only the API function code differs, plus inert shared-contract constants in the web bundle. This is the comparison in the table below. It says nothing about what a deployment changes in AWS.
+2. **Actual release change, the deployed `onboardos-dev` stack to M1 + v3.** This is what a change set built from the approved v3 commit will show, because M1 has never been deployed. The deployed stack still runs the earlier coworker code and has no coaching routes. The earlier statement that "a future change set should modify only the API function" was wrong for this reason.
+
+Incremental bundle comparison against `ba9a4fd` (real `sam build`):
+| Artifact | `ba9a4fd` | v3 working tree | Meaning |
+|---|---|---|---|
+| API function bundle | `2818009d2810` | `53d8c6e0878d` | Code change (v3 prompt, follow-up, verifier, notes rejection) |
+| Scenario runner bundle | `614664d077dc` | `614664d077dc` | Byte-identical to M1 |
+| Smoke bundle | `ddc0e860eeec` | `ddc0e860eeec` | Byte-identical |
+| `infrastructure/template.yaml` | | unchanged | No route, IAM, parameter, table or model change relative to M1 |
+
+(Hashes are of the committed v3 tree. Re-check them with `sam build` when the real change set is built.)
+
+### Acceptance criteria for the future M1 + v3 change set (deployed stack to the approved commit)
+The change set must be created from the approved v3 commit, reviewed with `describe-change-set`, and match this list. The currently existing change set `samcli-deploy1794139934` showed the same SHAPE (read-only description, 2026-11-08), but contains the v2 code and must not be reused.
+
+Expected:
+| Action | Resource | Why |
+|---|---|---|
+| Modify (Properties, no replacement) | `OnboardOSApiFunction` (`AWS::Lambda::Function`) | M1 + v3 API code |
+| Modify (Properties, no replacement) | `OnboardOSScenarioRunner` (`AWS::Lambda::Function`) | Code differs from the deployed runner because M1 added inert shared-contract schemas; suite and handler logic are unchanged |
+| Modify (Properties, no replacement) | `OnboardOSHttpApi` (`AWS::ApiGatewayV2::Api`) | The HTTP API definition gains the six coaching endpoints |
+| Add x6 | `OnboardOSApiFunctionApi{GetCoachingStudio,GetCoachingVersion,ListCoachingScenarios,PublishCoaching,SaveCoachingDraft,ValidateCoaching}Permission` (`AWS::Lambda::Permission`) | Lets API Gateway invoke the API function for the six new routes |
+| Modify (Properties), optional | `OnboardOSApiRole` (`AWS::IAM::Role`) | CloudFormation reports roles with dynamic references as a modification; the PROCESSED policy document and every other property must be unchanged. Verify by comparing the processed template's role with the deployed role, not by trusting the label. |
+
+Must NOT appear (stop and ask if any does):
+- any replacement (`Replacement` other than `False`), any Delete, or any Add other than the six Lambda permissions;
+- any change to DynamoDB tables or indexes (the data model is unchanged: coaching items live in the existing Core table);
+- any change to Cognito (pool, client, domain, users);
+- any change to the smoke function, parameters or outputs;
+- any IAM policy change beyond the no-op above: no new action, no wider resource, no `DeleteItem`, no new Bedrock permission or model;
+- a changed `CoworkerModelId` or model allow-list (a model change is a separate decision and a separate change set).
+
+Bundle evidence for the real change set: the API, runner and smoke bundle hashes of the commit being deployed, compared with `sam build` output at that commit. The deployed runner and API hashes will differ from them; that difference is expected and is exactly the Modify rows above.
+
+The frontend is a separate step and stays behind its build-time flags (`VITE_COACHING_STUDIO_ENABLED`, `VITE_COWORKER_ENABLED`).
+
+### Not verified on AWS
+No model was invoked for v3. The v3 evaluation has not run. `AI_UNVERIFIED` has never occurred against real output. The browser, Cognito, API Gateway and DynamoDB path with v3 is untested.

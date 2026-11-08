@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import type { CoachingDraftContent, CoachingVersionDetail } from "@onboardos/contracts";
-import { COACHING_LIMITS, COACHING_TEXT_MAX } from "@onboardos/contracts";
+import { COACHING_LIMITS, COACHING_NOTES_ENABLED, COACHING_NOTES_UNAVAILABLE, COACHING_TEXT_MAX } from "@onboardos/contracts";
 import { getCoachingStudio, getCoachingVersion, publishCoaching, saveCoachingDraft, validateCoaching } from "../lib/api.js";
 import { createController } from "../lib/studioController.js";
 import {
@@ -198,6 +198,11 @@ export function StudioView({ state, on }: { state: StudioState; on: Handlers }) 
 
       <div className="card">
         <h2>AI coaching behavior</h2>
+        <p className="muted" data-testid="behaviour-honesty">
+          These settings are instructions to the AI model. The platform checks what the coworker says about your employees' tests, configuration and progress against
+          verified records, but it cannot guarantee that the model follows style settings such as tone, length, hints or how it handles off-topic requests. How well it
+          does is measured in evaluation, not promised here.
+        </p>
         <div className="toolbar">
           <Select id="assistance" label="Assistance level" value={f.coaching.assistance} options={ASSISTANCE} disabled={off} onChange={(v) => set({ coaching: { ...f.coaching, assistance: v } })} />
           <Select id="hints" label="Hint progression" value={f.coaching.hintProgression} options={HINTS} disabled={off} onChange={(v) => set({ coaching: { ...f.coaching, hintProgression: v } })} />
@@ -213,9 +218,25 @@ export function StudioView({ state, on }: { state: StudioState; on: Handlers }) 
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" data-testid="notes-card">
         <h2>Manager coaching notes</h2>
-        <StringList id="coaching.notes" label="Coaching note" help="Short preferences about how to teach. They are subordinate to the platform's rules and cannot give the coworker new abilities, remove its limits, or change grading." items={f.coaching.notes} max={COACHING_LIMITS.maxNotes} maxChars={COACHING_TEXT_MAX.item} disabled={off} validation={state.validation} onChange={(notes) => set({ coaching: { ...f.coaching, notes } })} addLabel="Add note" />
+        {COACHING_NOTES_ENABLED ? (
+          <StringList id="coaching.notes" label="Coaching note" help="Short preferences about how to teach. They are subordinate to the platform's rules and cannot give the coworker new abilities, remove its limits, or change grading." items={f.coaching.notes} max={COACHING_LIMITS.maxNotes} maxChars={COACHING_TEXT_MAX.item} disabled={off} validation={state.validation} onChange={(notes) => set({ coaching: { ...f.coaching, notes } })} addLabel="Add note" />
+        ) : (
+          <>
+            <div className="info" role="status" data-testid="notes-unavailable">{COACHING_NOTES_UNAVAILABLE}</div>
+            <p className="muted">
+              Why: in testing, an AI model repeated a false statement because employer-written text told it to. Free-text instructions will return once they can be
+              applied safely. Learning objectives, success criteria, the structured settings above, terminology, constraints and reference material still shape the coaching.
+            </p>
+            {f.coaching.notes.length > 0 && (
+              <div className="error" role="alert" data-testid="notes-must-clear">
+                This draft contains {f.coaching.notes.length} note{f.coaching.notes.length === 1 ? "" : "s"} that cannot be saved or published.{" "}
+                <button type="button" className="btn btn-sm" disabled={off} onClick={() => set({ coaching: { ...f.coaching, notes: [] } })}>Remove the notes</button>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div className="card">

@@ -23,7 +23,9 @@ export type CoworkerErrorCode =
   | "AI_ERROR"
   | "AI_BAD_RESPONSE"
   | "AI_EMPTY_RESPONSE"
-  | "AI_FILTERED";
+  | "AI_FILTERED"
+  /** The model answered, but its answer contradicted the verified session facts and was withheld. */
+  | "AI_UNVERIFIED";
 
 /** One fixed, user-safe sentence per code. */
 export const COWORKER_ERROR_MESSAGES: Record<CoworkerErrorCode | "STRANDED", string> = {
@@ -34,6 +36,7 @@ export const COWORKER_ERROR_MESSAGES: Record<CoworkerErrorCode | "STRANDED", str
   AI_BAD_RESPONSE: "The AI coworker returned an unusable answer, which was discarded.",
   AI_EMPTY_RESPONSE: "The AI coworker returned an empty answer. Please try rephrasing.",
   AI_FILTERED: "The AI coworker's answer was withheld by a safety filter. Please try rephrasing.",
+  AI_UNVERIFIED: "The AI coworker's answer contradicted your verified session information, so it was withheld. Your tests, configuration and progress are unchanged. Please try rephrasing.",
   STRANDED: "This request did not finish. No answer was recorded; you can ask again.",
 };
 

@@ -401,3 +401,13 @@ export async function startedFor(api: Api, employee: Person = PEOPLE.empA, manag
   const s = await startAs(api, employee, assignmentId);
   return { assignmentId, sessionId: s.body.session.sessionId as string, session: s.body.session };
 }
+
+/**
+ * What the employee actually typed, as the model received it. Since coworker v3 the final user turn carries a platform reminder
+ * after the employee's text; tests that compare the employee's words strip it here.
+ */
+export const REMINDER_MARK = "\n\n[Platform reminder, not written by the employee]";
+export const employeeTurn = (text: string): string => (text.includes(REMINDER_MARK) ? text.slice(0, text.indexOf(REMINDER_MARK)) : text);
+/** A request's messages with the platform reminder removed from the last (employee) turn. */
+export const visibleMessages = (req: { messages: ReadonlyArray<{ role: string; text: string }> }) =>
+  req.messages.map((m, i) => (i === req.messages.length - 1 ? { ...m, text: employeeTurn(m.text) } : m));

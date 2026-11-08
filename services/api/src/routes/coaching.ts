@@ -19,6 +19,8 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import type { ZodIssue } from "zod";
 import {
+  COACHING_NOTES_ENABLED,
+  COACHING_NOTES_UNAVAILABLE,
   CoachingStudioResponseSchema,
   CoachingVersionDetailSchema,
   ListCoachingScenariosResponseSchema,
@@ -108,6 +110,8 @@ export interface Validation {
 /** The authoritative check: the same strict schema the runtime uses, plus the credential-shape guard. */
 export function validateContent(org: string, scenarioId: string, content: CoachingDraftContent, profileVersion: number): Validation {
   const errors: Validation["errors"] = [];
+  // Free-text notes are not applied by the runtime (see COACHING_NOTES_ENABLED), so they are not accepted: no silent ignoring.
+  if (!COACHING_NOTES_ENABLED && content.coaching.notes.length > 0) errors.push({ path: "coaching.notes", message: COACHING_NOTES_UNAVAILABLE });
   if (SECRET_SHAPES.test(JSON.stringify(content))) errors.push({ path: "content", message: SECRET_MESSAGE });
   const parsed = ScenarioCoachingProfileSchema.safeParse(profileFromContent(org, scenarioId, profileVersion, content));
   if (!parsed.success) for (const issue of parsed.error.issues) errors.push({ path: pathText(issue.path), message: friendly(issue) });
@@ -208,6 +212,7 @@ export async function handleSaveCoachingDraft(event: APIGatewayProxyEventV2, dep
   const { scenarioId, version } = scenario.content;
   const body = parseBody(event, SaveCoachingDraftRequestSchema, MAX_COACHING_BODY_BYTES);
   if (SECRET_SHAPES.test(JSON.stringify(body.content))) throw new HttpError(422, "CONTENT_REJECTED", SECRET_MESSAGE);
+  if (!COACHING_NOTES_ENABLED && body.content.coaching.notes.length > 0) throw new HttpError(422, "NOTES_UNAVAILABLE", COACHING_NOTES_UNAVAILABLE);
   const now = deps.now();
 
   if (body.expectedRevision === 0) {

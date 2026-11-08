@@ -29,8 +29,9 @@ const CONTENT: CoachingDraftContent = {
   terminology: [{ term: "504", meaning: "Gateway timeout." }],
   constraints: ["Stay inside the approved range."],
   reference: [{ title: "Guide", body: "Public text." }],
-  coaching: { assistance: "guide", hintProgression: "questions_first", tone: "friendly", maxWords: 150, offTopic: "redirect", uncertainty: "name_unknowns", notes: ["Prefer short answers."] },
+  coaching: { assistance: "guide", hintProgression: "questions_first", tone: "friendly", maxWords: 150, offTopic: "redirect", uncertainty: "name_unknowns", notes: [] },
 };
+const WITH_NOTES: CoachingDraftContent = { ...CONTENT, coaching: { ...CONTENT.coaching, notes: ["Prefer short answers."] } };
 
 const studioData = (over: Partial<CoachingStudioResponse> = {}): CoachingStudioResponse => ({
   scenario: { scenarioId: "inc-104", scenarioVersion: 1, title: "INC-104: Checkout API timeouts", targetRole: "junior cloud engineer" },
@@ -351,6 +352,45 @@ describe("feature flag and boundary", () => {
   it("the studio code never mentions hidden evaluation internals", () => {
     for (const f of ["views/CoachingStudio.tsx", "lib/coaching.ts", "pages/CoachingPage.tsx"]) {
       expect(readFileSync(join(SRC, f), "utf8"), f).not.toMatch(/inc-104-checkout-timeout|latency-profile|revision-hash-matches|testSuite|rubricVersion/);
+    }
+  });
+});
+
+describe("free-text coaching notes are honestly unavailable (coworker v3)", () => {
+  const clean = CONTENT;
+
+  it("explains that notes are unavailable and why, and offers no way to add one", () => {
+    const out = html(loaded(studioData({ template: clean })));
+    expect(out).toContain('data-testid="notes-unavailable"');
+    expect(out).toContain("temporarily unavailable");
+    expect(out).toContain("repeated a false statement");
+    expect(out).not.toContain("Add note");
+    expect(out).not.toContain('data-testid="notes-must-clear"');
+  });
+
+  it("a draft that still contains notes says they cannot be saved or published, and can remove them in one click", () => {
+    const s = loaded(studioData({ draft: draftOf(1, 0, WITH_NOTES) }));
+    const out = html(s);
+    expect(out).toContain('data-testid="notes-must-clear"');
+    expect(out).toContain("Remove the notes");
+    expect(derive(s)).toMatchObject({ canPublish: false, canSave: false });
+    expect(derive(s).publishBlockedReason).toMatch(/Remove the coaching notes first/);
+    const cleared = reducer(s, { type: "edit", form: { ...s.form!, coaching: { ...s.form!.coaching, notes: [] } } });
+    expect(derive(cleared).canSave).toBe(true); // the removal is an unsaved change that can now be saved
+    expect(html(cleared)).not.toContain('data-testid="notes-must-clear"');
+  });
+
+  it("does not claim the style settings are guaranteed", () => {
+    const out = html(loaded(studioData({ template: clean })));
+    expect(out).toContain('data-testid="behaviour-honesty"');
+    expect(out).toContain("cannot guarantee that the model follows style settings");
+    expect(out).toContain("measured in evaluation");
+  });
+
+  it("the structured customization controls are all still present", () => {
+    const out = html(loaded(studioData({ template: clean })));
+    for (const label of ["Assistance level", "Hint progression", "Communication tone", "Off-topic requests", "When unsure", "Preferred answer length", "Add objective", "Add criterion", "Add term", "Add constraint", "Add reference"]) {
+      expect(out, label).toContain(label);
     }
   });
 });

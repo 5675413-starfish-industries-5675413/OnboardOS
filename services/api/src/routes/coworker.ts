@@ -42,7 +42,9 @@ import {
   type CoworkerErrorCode,
 } from "../bedrock.js";
 import { resolveCoachingForAssignment } from "../coachingRuntime.js";
-import { COWORKER_PROMPT_VERSION, buildCoworkerRequest, type PriorTurn } from "../coworkerContext.js";
+import type { PriorTurn } from "../coworkerContext.js";
+import { COWORKER_PROMPT_VERSION_V3, buildCoworkerRequestV3, type BuiltRequestV3 } from "../coworkerContextV3.js";
+import { buildVerifiedFacts, disposeReply } from "../evidenceVerifier.js";
 import {
   FRESH_CONTROL,
   LEASE_MS,
@@ -225,7 +227,8 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
 
   // -- reserve ---------------------------------------------------------------
   let turn: TurnRecord | null = null;
-  let pendingRequest: ReturnType<typeof buildCoworkerRequest> | null = null;
+  let pendingRequest: BuiltRequestV3 | null = null;
+  let facts = null as ReturnType<typeof buildVerifiedFacts> | null;
   let current = state;
 
   for (let attempt = 0; attempt < MAX_RESERVE_ATTEMPTS && !turn; attempt++) {
@@ -248,7 +251,9 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
     // Everything the model will be told is built BEFORE the reservation, from authorized records.
     const history = await historyFor(deps, state.sessionId);
     const currentRun = await currentRunFor(deps, current, scenario.testSuiteVersion);
-    const request = buildCoworkerRequest({ scenario, coaching: coaching.profile, state: current, currentRun, history, message });
+    // Facts the model is shown AND the facts its reply is checked against: the same server records, read once.
+    facts = buildVerifiedFacts({ state: current, baseline: scenario.content.initialConfig, currentRun, assignmentStatus: assignment.status });
+    const request = buildCoworkerRequestV3({ scenario, coaching: coaching.profile, state: current, currentRun, history, message, facts });
 
     // A previous holder whose lease expired is closed in the same transaction.
     let stranded: { turnId: string; code: string; message: string } | null = null;
@@ -267,7 +272,8 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       turnId,
       userText: message,
       modelId: provider.modelId,
-      promptVersion: COWORKER_PROMPT_VERSION,
+      promptVersion: COWORKER_PROMPT_VERSION_V3,
+      followUpKind: request.followUp?.kind ?? null,
       coaching: {
         profileId: coaching.profile.profileId,
         profileVersion: coaching.profile.profileVersion,
@@ -318,17 +324,37 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
   // -- call (only the reservation winner reaches here) -------------------------
   let outcome: TurnOutcome;
   try {
-    const reply = await provider.converse(pendingRequest);
-    const text = reply.text.length > COWORKER_MAX_REPLY_CHARS ? reply.text.slice(0, COWORKER_MAX_REPLY_CHARS) : reply.text;
-    outcome = {
-      kind: "COMPLETE",
-      reply: text,
-      truncated: reply.truncated || text.length < reply.text.length,
-      usage: { input: reply.inputTokens, output: reply.outputTokens },
-      requestId: reply.requestId,
-      stopReason: reply.stopReason,
-      latencyMs: reply.latencyMs,
-    };
+    const reply = await provider.converse(pendingRequest.request);
+    // The model is not the source of truth for tests, saved configuration, progress or review. Before anything is stored or shown,
+    // the reply is checked against the same verified facts the model was given. A material contradiction withholds the reply: it is
+    // not corrected, no replacement evidence is invented, and nothing about the session changes. (A bounded check, not a guarantee.)
+    // The decision is made by disposeReply, the same function the v3 evaluation uses. Missing facts fail CLOSED (an error, never an unchecked answer).
+    if (!facts) throw new Error("verified facts unavailable");
+    const shown = disposeReply(reply, facts, COWORKER_MAX_REPLY_CHARS);
+    if (shown.visible === "WITHHELD_UNVERIFIED") {
+      console.error(
+        JSON.stringify({
+          event: "coworker_reply_withheld",
+          turnId: turn.turnId,
+          kinds: shown.contradictions.map((x) => x.kind),
+          requestId: reply.requestId,
+          inputTokens: reply.inputTokens,
+          outputTokens: reply.outputTokens,
+          promptVersion: COWORKER_PROMPT_VERSION_V3,
+        }),
+      );
+      outcome = { kind: "ERROR", code: "AI_UNVERIFIED", message: COWORKER_ERROR_MESSAGES.AI_UNVERIFIED, requestId: reply.requestId };
+    } else {
+      outcome = {
+        kind: "COMPLETE",
+        reply: shown.text,
+        truncated: shown.truncated,
+        usage: { input: reply.inputTokens, output: reply.outputTokens },
+        requestId: reply.requestId,
+        stopReason: reply.stopReason,
+        latencyMs: reply.latencyMs,
+      };
+    }
   } catch (err) {
     const code: CoworkerErrorCode = err instanceof CoworkerProviderError ? err.code : "AI_ERROR";
     outcome = {
@@ -352,7 +378,7 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       requestId: outcome.requestId,
       latencyMs: outcome.kind === "COMPLETE" ? outcome.latencyMs : null,
       modelId: provider.modelId,
-      promptVersion: COWORKER_PROMPT_VERSION,
+      promptVersion: COWORKER_PROMPT_VERSION_V3,
       coachingProfileId: turn.coachingProfileId ?? null,
       coachingProfileVersion: turn.coachingProfileVersion ?? null,
       coachingProfileSource: turn.coachingProfileSource ?? null,

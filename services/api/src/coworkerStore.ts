@@ -115,6 +115,8 @@ const TurnSchema = z
     coachingProfileVersion: z.number().int().positive().optional(),
     coachingProfileHash: z.string().optional(),
     coachingProfileSource: z.enum(["BUILTIN", "PLATFORM_DEFAULT", "INVALID_FALLBACK", "ORG_PUBLISHED"]).optional(),
+    /** coworker-v3: the kind of bare follow-up the message was recognised as, when it was (audit only). */
+    followUpKind: z.enum(["SIMPLIFY", "CLARIFY", "ELABORATE", "SHORTEN", "JUSTIFY"]).optional(),
     createdAt: z.string(),
     completedAt: z.string().nullable(),
     errorCode: z.string().nullable(),
@@ -151,6 +153,7 @@ export function buildPendingTurn(input: {
   userText: string;
   modelId: string;
   promptVersion: string;
+  followUpKind?: "SIMPLIFY" | "CLARIFY" | "ELABORATE" | "SHORTEN" | "JUSTIFY" | null;
   coaching?: { profileId: string; profileVersion: number; hash: string; source: "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" | "ORG_PUBLISHED" };
   now: string;
 }): TurnRecord {
@@ -167,6 +170,7 @@ export function buildPendingTurn(input: {
     isTruncated: false,
     modelId: input.modelId,
     promptVersion: input.promptVersion,
+    ...(input.followUpKind ? { followUpKind: input.followUpKind } : {}),
     ...(input.coaching
       ? {
           coachingProfileId: input.coaching.profileId,

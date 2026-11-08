@@ -13,7 +13,7 @@ import type {
   CoachingVersionSummary,
   ValidateCoachingResponse,
 } from "@onboardos/contracts";
-import { COACHING_LIMITS } from "@onboardos/contracts";
+import { COACHING_LIMITS, COACHING_NOTES_ENABLED } from "@onboardos/contracts";
 import { ApiError } from "./api.js";
 
 export const cloneContent = (c: CoachingDraftContent): CoachingDraftContent => JSON.parse(JSON.stringify(c)) as CoachingDraftContent;
@@ -152,15 +152,18 @@ export function derive(s: StudioState): Derived {
   const draft = s.data?.draft ?? null;
   const published = s.data?.currentProfileVersion ?? null;
   const hasUnpublishedChanges = !!draft && draft.revision > draft.publishedThroughRevision;
+  // Notes cannot be saved or published while they are unavailable: say so instead of letting the server refuse silently.
+  const notesBlocked = !COACHING_NOTES_ENABLED && (s.form?.coaching.notes.length ?? 0) > 0;
   let reason: string | null = null;
-  if (s.conflict) reason = "Reload first: someone else changed this configuration.";
+  if (notesBlocked) reason = "Remove the coaching notes first: free-text notes are temporarily unavailable.";
+  else if (s.conflict) reason = "Reload first: someone else changed this configuration.";
   else if (busy) reason = "Please wait for the current action to finish.";
   else if (dirty) reason = "Save your changes before publishing.";
   else if (!draft) reason = "Save a draft before publishing.";
   else if (!hasUnpublishedChanges) reason = "This draft is already published.";
   return {
     dirty, busy,
-    canSave: !!s.form && dirty && !busy && !s.conflict,
+    canSave: !!s.form && dirty && !busy && !s.conflict && !notesBlocked,
     canPublish: reason === null,
     publishBlockedReason: reason,
     hasUnpublishedChanges,

@@ -38,6 +38,17 @@ export const COACHING_TEXT_MAX = {
   referenceBody: 800,
 } as const;
 
+/**
+ * Free-text "coaching notes" are TEMPORARILY UNAVAILABLE (coworker v3). The first real-model evaluation showed that a small
+ * model obeys an imperative sentence in employer text (it repeated "all tests passed" because a note said to). Until free-text
+ * instructions can be applied safely, the server rejects them (save, validate, publish) and the Studio says so, rather than
+ * accepting guidance that the runtime then ignores. Structured settings, objectives, criteria, terminology, constraints and
+ * public reference material remain available. The field stays in the contract so it can return without a migration.
+ */
+export const COACHING_NOTES_ENABLED = false as boolean;
+export const COACHING_NOTES_UNAVAILABLE =
+  "Free-text coaching notes are temporarily unavailable. Use the structured settings, learning objectives and supporting context instead.";
+
 const draftText = (max: number) => z.string().max(max);
 
 export const CoachingDraftContentSchema = z.strictObject({
