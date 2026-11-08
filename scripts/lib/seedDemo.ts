@@ -1,5 +1,5 @@
 /**
- * Provisioning logic for the Northstar Cloud demo identities.
+ * Provisioning logic for the AWS demo identities.
  *
  * This module has NO side effects on import and never reads process.env,
  * process.argv, or the terminal -- everything is injected. The CLI wrapper
@@ -251,7 +251,7 @@ export async function ensureOrganizationProfile(
         Item: {
           ...key,
           organizationId: orgId,
-          name: "Northstar Cloud",
+          name: "AWS",
           createdAt: new Date().toISOString(),
           seeded: true,
         },

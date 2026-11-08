@@ -130,6 +130,11 @@ export function parseTimeoutInput(raw: string): TimeoutInput {
   return { ok: true, value };
 }
 
+/** The seeded demo workplace is shown as AWS. Any other organization name is shown as stored. */
+export function displayOrganizationName(name: string): string {
+  return name === "Northstar Cloud" ? "AWS" : name;
+}
+
 /** First 12 hex characters of a `sha256:` hash, for display. */
 export function shortHash(hash: string): string {
   return hash.replace(/^sha256:/, "").slice(0, 12);

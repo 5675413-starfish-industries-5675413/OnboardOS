@@ -18,6 +18,7 @@ import {
   resolveSendKey,
   reviewQueue,
   runBadge,
+  displayOrganizationName,
   shortHash,
   submissionReadiness,
   validateCoworkerMessage,
@@ -134,6 +135,11 @@ describe("run presentation", () => {
     expect(runBadge({ status: "ERROR", stale: false }).tone).toBe("bad");
     expect(runBadge({ status: "PENDING", stale: false }).label).toBe("Running");
   });
+  it("shows the seeded demo workplace as AWS and leaves other names unchanged", () => {
+    expect(displayOrganizationName("Northstar Cloud")).toBe("AWS");
+    expect(displayOrganizationName("Contoso")).toBe("Contoso");
+  });
+
   it("shortHash drops the algorithm prefix", () => {
     expect(shortHash("sha256:" + "ab".repeat(32))).toBe("abababababab");
   });

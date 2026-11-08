@@ -131,7 +131,6 @@ table.data th { font-size: 11px; letter-spacing: 0.04em; text-transform: upperca
 .workspace-shell { min-height: 100vh; display: grid; grid-template-columns: 232px 1fr; }
 .workspace-sidebar { background: var(--white); border-right: 1px solid var(--powder); padding: 20px 14px; display: flex; flex-direction: column; gap: 18px; }
 .brand-link { color: var(--ink); text-decoration: none; font-size: 20px; font-weight: 300; letter-spacing: -0.02em; }
-.brand-os { color: var(--violet); }
 .workspace-context, .sidebar-footer { display: flex; gap: 10px; align-items: center; }
 .workspace-context strong, .sidebar-footer strong { display: block; font-size: 13px; font-weight: 500; }
 .workspace-context span, .sidebar-footer span { display: block; color: var(--ghost); font-size: 12px; }

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "react-router-dom";
 import { initiateLogin } from "../lib/auth.js";
-import { missingConfig } from "../lib/config.js";
+import { localSignInOriginWarning, missingConfig } from "../lib/config.js";
 
 const STEPS = [
   "A manager assigns the INC-104 simulation.",
@@ -16,6 +16,7 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
 
   const missing = missingConfig();
+  const originProblem = localSignInOriginWarning();
   const expired = (location.state as { reason?: string } | null)?.reason === "expired";
 
   async function handleLogin() {
@@ -33,16 +34,19 @@ export function LoginPage() {
   return (
     <div className="login-screen">
       <div className="card login-card">
-        <p className="eyebrow">Northstar Cloud</p>
+        <p className="eyebrow">AWS</p>
         <h1>Sign in to OnboardOS</h1>
         <p>
-          Learn the job by doing the job. Sign in with your Northstar Cloud
-          account to access your onboarding workspace.
+          Learn the job by doing the job. Sign in with your AWS account to
+          access your onboarding workspace.
         </p>
         {expired && (
           <div className="info" role="status">
             Your session has expired. Please sign in again.
           </div>
+        )}
+        {originProblem && (
+          <div className="error" role="alert">{originProblem}</div>
         )}
         {missing.length > 0 && (
           <div className="error" role="alert">
@@ -55,12 +59,12 @@ export function LoginPage() {
         <button
           className="btn"
           onClick={handleLogin}
-          disabled={loading || missing.length > 0}
+          disabled={loading || missing.length > 0 || originProblem !== null}
         >
-          {loading ? "Redirecting…" : "Sign in with Northstar Cloud"}
+          {loading ? "Redirecting…" : "Sign in with AWS"}
         </button>
         <p className="muted">
-          Accounts are provisioned by your organization administrator. This page redirects to the organization sign-in service. It does not collect a password here.
+          Accounts are provisioned by your administrator. This page redirects to AWS sign-in. It does not collect a password here.
         </p>
         <ol className="login-steps">
           {STEPS.map((step, index) => <li key={step}><span>{index + 1}</span>{step}</li>)}

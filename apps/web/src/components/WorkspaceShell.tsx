@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 export type SectionLink = { id: string; label: string };
 
 export function Brand() {
-  return <span className="brand"><span className="brand-mark" aria-hidden="true">o</span>onboard<span className="brand-os">OS</span></span>;
+  return <span className="brand">OnboardOS</span>;
 }
 
 /** Presentation only. Links expose existing screens; the API still authorizes every action. */
@@ -23,8 +23,8 @@ export function WorkspaceShell({ children, area, organization, username, section
         <Link to="/app" className="brand-link" aria-label="OnboardOS dashboard" onClick={(e) => { if (onLeave && !onLeave()) e.preventDefault(); }}><Brand /></Link>
         <div className="workspace-context"><span className="workspace-avatar" aria-hidden="true">{(organization ?? "W").slice(0, 1).toUpperCase()}</span><div><strong>{organization ?? "Training workspace"}</strong><span>Workplace simulation</span></div></div>
         <nav aria-label="Workspace navigation">
-          <Link className="nav-link" to="/app" aria-current={area === "Overview" ? "page" : undefined} onClick={(e) => { if (onLeave && !onLeave()) e.preventDefault(); }}><span aria-hidden="true">⌂</span>Overview</Link>
-          {area !== "Overview" && <span className="nav-link nav-current"><span aria-hidden="true">▤</span>{area}</span>}
+          <Link className="nav-link" to="/app" aria-current={area === "Overview" ? "page" : undefined} onClick={(e) => { if (onLeave && !onLeave()) e.preventDefault(); }}>Overview</Link>
+          {area !== "Overview" && <span className="nav-link nav-current">{area}</span>}
           {sections.length > 0 && <><p className="nav-label">On this page</p>{sections.map((section) => <a className="nav-link nav-section" href={`#${section.id}`} key={section.id}>{section.label}</a>)}</>}
         </nav>
         <div className="sidebar-footer"><span className="workspace-avatar" aria-hidden="true">{username?.slice(0, 1).toUpperCase() ?? "O"}</span><div><strong>{username ?? "OnboardOS"}</strong><span>Signed-in workspace</span></div></div>

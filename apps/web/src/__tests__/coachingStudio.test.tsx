@@ -92,7 +92,7 @@ describe("editing state", () => {
     s = reducer(s, { type: "saved", draft: draftOf(1, 0, { ...CONTENT, learningObjectives: ["x"] }) });
     expect(isDirty(s)).toBe(false);
     expect(s.baselineRevision).toBe(1);
-    expect(s.notice).toContain("revision 1");
+    expect(s.notice).toBe("Draft saved.");
     expect(s.data?.draft?.revision).toBe(1);
   });
 });
@@ -219,10 +219,10 @@ describe("what the screen says about coaching versus assessment", () => {
       expect(out, h).toContain(h);
     }
   });
-  it("shows scenario context: title, role, scenario version", () => {
+  it("shows scenario context: title and role", () => {
     expect(out).toContain("INC-104: Checkout API timeouts");
     expect(out).toContain("junior cloud engineer");
-    expect(out).toContain("Scenario version");
+    expect(out).not.toContain("Scenario version");
   });
   it("escapes manager-written text", () => {
     const s = reducer(loaded(), { type: "edit", form: { ...CONTENT, learningObjectives: ['<img src=x onerror=alert(1)>'] } });

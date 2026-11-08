@@ -2,7 +2,7 @@
 
 Learn the job by doing the job.
 
-OnboardOS lets a new cloud engineer practice one realistic incident in a controlled workplace. The employee investigates, changes a service setting, and gets a deterministic AWS test result. A manager reviews the frozen evidence and makes the final call.
+OnboardOS lets a new cloud engineer practice one realistic incident in a controlled workplace. The employee investigates, changes a service setting, and gets a deterministic AWS test result. A manager reviews the frozen evidence and makes the final call. The app and sign-in screen use the name AWS. Sign-in is Amazon Cognito. The incident, ticket, and diagnostics remain a simulation.
 
 ## Overview
 

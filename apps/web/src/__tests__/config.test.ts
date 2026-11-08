@@ -4,6 +4,7 @@ import {
   buildLogoutUrl,
   config,
   hostedUiHost,
+  localSignInOriginWarning,
   missingConfig,
   tokenEndpoint,
 } from "../lib/config.js";
@@ -81,6 +82,13 @@ describe("Hosted UI URLs", () => {
     const login = new URL(buildLoginUrl("c", "s", "https://app.example.com"));
     expect(login.searchParams.get("redirect_uri")).toBe("https://app.example.com/callback");
     expect(ORIGIN).toBe("http://localhost:5173"); // helper default stays aligned with template.yaml
+  });
+
+  it("rejects loopback and non-5173 local origins before Cognito sees them", () => {
+    expect(localSignInOriginWarning("http://localhost:5173")).toBeNull();
+    expect(localSignInOriginWarning("https://onboard-os-nine.vercel.app")).toBeNull();
+    expect(localSignInOriginWarning("http://127.0.0.1:5173")).toMatch(/localhost:5173/);
+    expect(localSignInOriginWarning("http://localhost:5174")).toMatch(/localhost:5173/);
   });
 
   it("URL-encodes state so it cannot inject extra query parameters", () => {

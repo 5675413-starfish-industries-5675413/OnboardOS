@@ -22,6 +22,7 @@ import {
   config,
   buildLoginUrl,
   buildLogoutUrl,
+  localSignInOriginWarning,
   redirectUri,
   tokenEndpoint,
 } from "./config.js";
@@ -76,6 +77,9 @@ export function clearSession(): void {
 
 /** Start the authorization-code + PKCE login: store verifier/state, then redirect. */
 export async function initiateLogin(): Promise<void> {
+  const originProblem = localSignInOriginWarning();
+  if (originProblem) throw new Error(originProblem);
+
   const verifier = generateCodeVerifier();
   const challenge = await generateCodeChallenge(verifier);
   const state = generateState();

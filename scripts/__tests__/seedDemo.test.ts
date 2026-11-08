@@ -266,7 +266,7 @@ describe("provisioning behaviour", () => {
     const summary = await seedDemo(deps(), TARGET, buildDemoUsers(), { setPasswords: false });
 
     expect(summary.failures).toBe(0);
-    expect(dynamo.items.get("ORG#northstar-cloud|PROFILE")?.["name"]).toBe("Northstar Cloud");
+    expect(dynamo.items.get("ORG#northstar-cloud|PROFILE")?.["name"]).toBe("AWS");
 
     const roles = new Map<string, string>();
     for (const [k, item] of dynamo.items) {

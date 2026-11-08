@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * seed-demo.ts -- operator-run provisioning of the three Northstar Cloud demo
+ * seed-demo.ts -- operator-run provisioning of the three AWS demo
  * identities (org_admin, manager, employee).
  *
  * This is NEVER run by the build, tests, CI, or deployment. An operator runs it

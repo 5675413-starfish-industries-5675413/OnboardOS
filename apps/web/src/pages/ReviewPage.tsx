@@ -117,8 +117,7 @@ export function ReviewPage() {
         </p>
         <p className="muted">
           Assignment status:{" "}
-          <span className={toneClass(assignmentStatusTone(assignment.status))}>{assignmentStatusLabel(assignment.status)}</span>{" "}
-          · scenario v{sub.scenarioVersion} · rubric v{sub.rubricVersion} · evidence manifest v{sub.manifestVersion}
+          <span className={toneClass(assignmentStatusTone(assignment.status))}>{assignmentStatusLabel(assignment.status)}</span>
         </p>
         <div className="banner banner-warn" role="note">
           <strong>Evaluation: {sub.evaluation.status === "NOT_CONFIGURED" ? "not configured" : sub.evaluation.status}.</strong>{" "}
@@ -145,16 +144,15 @@ export function ReviewPage() {
         <h2>Frozen evidence</h2>
         <p className="muted">Read-only. This is what the server held when the employee submitted; later activity cannot change it.</p>
         <p data-testid="frozen-config">
-          Configuration revision {sub.config.revision === 0 ? "0 (baseline)" : sub.config.revision} ·{" "}
-          <span className="mono">{sub.config.configHash}</span> · <span className="mono">{JSON.stringify(sub.config.snapshot)}</span>
+          Configuration revision {sub.config.revision === 0 ? "0 (baseline)" : sub.config.revision} · request timeout {sub.config.snapshot.request_timeout_ms} ms
         </p>
         <div className="banner banner-aws" role="note">
-          <strong>Real execution.</strong> Tests ran in a dedicated AWS Lambda function (suite v{run.suiteVersion}) against this exact
+          <strong>Real execution.</strong> Tests ran in a dedicated AWS Lambda function against this exact
           revision. The investigation diagnostics the employee read were <em>synthetic</em>.
         </div>
         <div className="row">
           <strong>
-            Test run <span className="mono">{run.testRunId}</span>
+            Test result
           </strong>
           <span className={toneClass(run.status === "PASSED" ? "ok" : "bad")}>
             {run.status === "PASSED" ? "Passed" : "Failed"} {run.passedCount}/{run.totalCount}
@@ -165,9 +163,8 @@ export function ReviewPage() {
         )}
         {run.executor && (
           <p className="muted" data-testid="review-executor">
-            Executed on AWS Lambda ({run.executor.region}) · runner request <span className="mono">{run.executor.runnerRequestId}</span>
-            {run.executor.invokeRequestId && <> · invoke request <span className="mono">{run.executor.invokeRequestId}</span></>}
-            · completed {run.completedAt ? new Date(run.completedAt).toLocaleString() : "—"}
+            Ran on AWS Lambda in {run.executor.region}
+            {run.completedAt && <> · {new Date(run.completedAt).toLocaleString()}</>}
           </p>
         )}
         <table className="data">
@@ -195,7 +192,7 @@ export function ReviewPage() {
         <ol className="timeline" data-testid="timeline">
           {bundle.timeline.map((e) => (
             <li key={e.sequence}>
-              <span className="mono muted">#{e.sequence} {new Date(e.occurredAt).toLocaleTimeString()}</span>{" "}
+              <span className="muted">{new Date(e.occurredAt).toLocaleString()}</span>{" "}
               <span className="pill">{e.actor === "EMPLOYEE" ? "Employee" : e.actor === "SYSTEM" ? "System" : "Reviewer"}</span>{" "}
               {e.summary}
             </li>

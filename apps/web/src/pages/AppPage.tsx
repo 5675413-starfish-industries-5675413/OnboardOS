@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { MeResponse, OrgRole } from "@onboardos/contracts";
 import { ApiError, getMe } from "../lib/api.js";
 import { getSession, logout } from "../lib/auth.js";
-import { viewForRole } from "../lib/views.js";
+import { displayOrganizationName, viewForRole } from "../lib/views.js";
 import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import { EmployeeView } from "../views/EmployeeView.js";
 import { ManagerView } from "../views/ManagerView.js";
@@ -99,9 +99,10 @@ export function AppPage() {
   // makes is re-authorized by the backend from the verified token and DynamoDB.
   const primary = me.memberships[0];
   const view = primary ? viewForRole(primary.role) : "identity";
+  const workplace = primary ? displayOrganizationName(primary.organizationName) : undefined;
 
   return (
-    <WorkspaceShell area="Overview" organization={primary?.organizationName} username={me.username}>
+    <WorkspaceShell area="Overview" organization={workplace} username={me.username}>
     <div className={view === "identity" ? "container" : "container-wide"}>
       <div className="card">
         <div className="row">
@@ -122,19 +123,11 @@ export function AppPage() {
           me.memberships.map((m) => (
             <div key={m.organizationId} style={{ marginBottom: "1.5rem" }}>
               <div className="row">
-                <span className="value">{m.organizationName}</span>
+                <span className="value">{displayOrganizationName(m.organizationName)}</span>
                 <span className={roleBadgeClass(m.role)}>
                   {roleLabel(m.role)}
                 </span>
               </div>
-              <div className="label" style={{ marginTop: ".25rem" }}>
-                Organization ID: {m.organizationId}
-              </div>
-              {m.teamIds.length > 0 && (
-                <div className="label" style={{ marginTop: ".25rem" }}>
-                  Teams: {m.teamIds.join(", ")}
-                </div>
-              )}
             </div>
           ))
         )}

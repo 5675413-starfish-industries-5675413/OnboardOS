@@ -154,7 +154,6 @@ export function StudioView({ state, on }: { state: StudioState; on: Handlers }) 
         <h2>{data.scenario.title}</h2>
         <dl>
           <dt className="label">Associated role</dt><dd className="value">{data.scenario.targetRole ?? "Not specified"}</dd>
-          <dt className="label">Scenario version</dt><dd className="value">{data.scenario.scenarioVersion}</dd>
           <dt className="label">Current published coaching version</dt>
           <dd className="value">{data.currentProfileVersion ? `Version ${data.currentProfileVersion}` : "None published"}</dd>
           <dt className="label">New assignments will use</dt><dd className="value">{d.newAssignmentsUse}</dd>
@@ -164,7 +163,7 @@ export function StudioView({ state, on }: { state: StudioState; on: Handlers }) 
           employee and can be quoted by the AI coworker. Do not enter grading details, thresholds or answers.
         </p>
         <div className="row">
-          <span>{d.dirty ? <strong>Unsaved changes</strong> : data.draft ? `Draft saved (revision ${data.draft.revision})` : "No draft saved yet (starting from the platform's template)"}</span>
+          <span>{d.dirty ? <strong>Unsaved changes</strong> : data.draft ? "Draft saved" : "No draft saved yet (starting from the platform's template)"}</span>
           {d.dirty && <span className="muted" data-testid="unsaved">You will lose these edits if you leave this page.</span>}
         </div>
       </div>

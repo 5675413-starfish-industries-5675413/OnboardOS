@@ -22,7 +22,6 @@ import {
   evidenceNote,
   parseTimeoutInput,
   runBadge,
-  shortHash,
   submissionReadiness,
   toneClass,
   validateReport,
@@ -300,8 +299,7 @@ export function SessionPage() {
         </div>
         <p>{scenario.summary}</p>
         <p className="muted">
-          <span className="pill pill-progress">{session.phase === "INVESTIGATING" ? "Investigating" : session.phase === "SUBMITTED" ? "Submitted" : session.phase}</span>{" "}
-          Server state version {session.stateVersion}
+          <span className="pill pill-progress">{phaseLabel(session.phase)}</span>
           {session.startedAt && <> · started {new Date(session.startedAt).toLocaleString()}</>}
         </p>
         {notice && <div className="info" role="status">{notice}</div>}
@@ -383,6 +381,14 @@ export function SessionPage() {
     </div>
     </WorkspaceShell>
   );
+}
+
+function phaseLabel(phase: SessionView["phase"]): string {
+  switch (phase) {
+    case "NOT_STARTED": return "Not started";
+    case "INVESTIGATING": return "Investigating";
+    case "SUBMITTED": return "Submitted";
+  }
 }
 
 function TicketPanel({ session }: { session: SessionView }) {
@@ -476,11 +482,10 @@ function ConfigCard(props: {
     <div className="card">
       <h2>Configuration</h2>
       <p className="muted" data-testid="config-summary">
-        {session.configRevision === 0 ? "Baseline (no revision saved yet)" : `Revision ${session.configRevision}`} ·{" "}
-        <span className="mono">{shortHash(session.configHash)}</span>
+        {session.configRevision === 0 ? "Baseline, no saved change yet" : `Saved revision ${session.configRevision}`}
       </p>
-      <p className="mono" data-testid="config">
-        {JSON.stringify(session.config)}
+      <p data-testid="config">
+        Request timeout: {session.config.request_timeout_ms} ms
       </p>
       <form
         onSubmit={(e) => {
@@ -490,7 +495,7 @@ function ConfigCard(props: {
       >
         <div className="toolbar">
           <div>
-            <label htmlFor="timeout-input">request_timeout_ms</label>
+            <label htmlFor="timeout-input">Request timeout (ms)</label>
             <input
               id="timeout-input"
               type="number"
@@ -522,8 +527,7 @@ function ConfigCard(props: {
           <thead>
             <tr>
               <th scope="col">Revision</th>
-              <th scope="col">request_timeout_ms</th>
-              <th scope="col">Hash</th>
+              <th scope="col">Request timeout</th>
               <th scope="col">Saved</th>
             </tr>
           </thead>
@@ -531,8 +535,7 @@ function ConfigCard(props: {
             {session.revisions.map((r) => (
               <tr key={r.revision}>
                 <td>{r.revision}{r.revision === session.configRevision && <> <span className="pill pill-ok">current</span></>}</td>
-                <td className="mono">{r.config.request_timeout_ms}</td>
-                <td className="mono">{shortHash(r.configHash)}</td>
+                <td>{r.config.request_timeout_ms} ms</td>
                 <td>{new Date(r.savedAt).toLocaleString()}</td>
               </tr>
             ))}
@@ -586,8 +589,7 @@ function RunCard({ run }: { run: TestRunView }) {
     <section className={run.stale ? "run run-stale" : "run"} aria-label={`Test run on revision ${run.configRevision}`} data-testid="test-run">
       <div className="row">
         <strong>
-          Revision {run.configRevision}{" "}
-          <span className="mono muted">{shortHash(run.configHash)} · {run.configSnapshot.request_timeout_ms} ms</span>
+          Revision {run.configRevision} · {run.configSnapshot.request_timeout_ms} ms
         </strong>
         <span>
           <span className={`pill ${tone}`}>{badge.label}</span>{" "}
@@ -601,8 +603,8 @@ function RunCard({ run }: { run: TestRunView }) {
       )}
       {run.executor && (
         <p className="muted" data-testid="executor">
-          Executed on AWS Lambda ({run.executor.region}) · runner request <span className="mono">{run.executor.runnerRequestId}</span>
-          {run.executor.invokeRequestId && <> · invoke request <span className="mono">{run.executor.invokeRequestId}</span></>}
+          Ran on AWS Lambda in {run.executor.region}
+          {run.completedAt && <> · {new Date(run.completedAt).toLocaleString()}</>}
         </p>
       )}
       {run.errorMessage && <div className="error" role="alert">{run.errorMessage}</div>}
@@ -657,8 +659,7 @@ function ReportCard(props: {
         {readiness.ready ? (
           <>
             <p>
-              Configuration revision {session.configRevision === 0 ? "0 (baseline)" : session.configRevision} ·{" "}
-              <span className="mono">{shortHash(session.configHash)}</span> · {session.config.request_timeout_ms} ms
+              Configuration revision {session.configRevision === 0 ? "0 (baseline)" : session.configRevision} · request timeout {session.config.request_timeout_ms} ms
             </p>
             <p>
               Latest test run:{" "}
@@ -756,16 +757,12 @@ function SubmissionCard(props: {
 
       <h3 style={{ fontSize: ".95rem", margin: ".9rem 0 .25rem" }}>Evidence submitted</h3>
       <p>
-        Configuration revision {sub.config.revision} · <span className="mono">{shortHash(sub.config.configHash)}</span> ·{" "}
-        {sub.config.snapshot.request_timeout_ms} ms. Test run{" "}
+        Configuration revision {sub.config.revision} · request timeout {sub.config.snapshot.request_timeout_ms} ms. Tests{" "}
         <span className={toneClass(sub.testRun.status === "PASSED" ? "ok" : "bad")}>
           {sub.testRun.status === "PASSED" ? "Passed" : "Failed"}
         </span>{" "}
         {sub.testRun.passedCount} of {sub.testRun.totalCount}
-        {sub.testRun.executor && (
-          <> · executed on AWS Lambda ({sub.testRun.executor.region}), runner request{" "}
-            <span className="mono">{sub.testRun.executor.runnerRequestId}</span></>
-        )}
+        {sub.testRun.executor && <> · ran on AWS Lambda in {sub.testRun.executor.region}</>}
         .
       </p>
       {REPORT_FIELDS.map(({ key, label }) => (

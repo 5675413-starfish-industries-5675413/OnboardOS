@@ -85,6 +85,21 @@ export function redirectUri(origin: string = window.location.origin): string {
   return `${origin}/callback`;
 }
 
+/**
+ * Cognito only accepts the callback origins registered on the app client.
+ * `127.0.0.1` and `localhost` are different origins, and the local client
+ * registers `http://localhost:5173` only. Sending the other address produces
+ * Cognito's generic "Something went wrong" page.
+ */
+export function localSignInOriginWarning(origin: string = window.location.origin): string | null {
+  const url = new URL(origin);
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+  if (loopback || (url.hostname === "localhost" && url.port !== "" && url.port !== "5173")) {
+    return "Open http://localhost:5173 to sign in. This address is not registered with the sign-in service.";
+  }
+  return null;
+}
+
 /** Build the Hosted UI authorize URL for the authorization-code + PKCE flow. */
 export function buildLoginUrl(
   codeChallenge: string,

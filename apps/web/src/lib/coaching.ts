@@ -104,7 +104,7 @@ export function reducer(s: StudioState, a: Action): StudioState {
       return { ...s, saving: true, error: null, notice: null };
     case "saved": {
       const data = s.data ? { ...s.data, draft: a.draft } : s.data;
-      return { ...s, saving: false, data, baseline: cloneContent(a.draft.content), baselineRevision: a.draft.revision, notice: `Draft saved (revision ${a.draft.revision}).`, conflict: false };
+      return { ...s, saving: false, data, baseline: cloneContent(a.draft.content), baselineRevision: a.draft.revision, notice: "Draft saved.", conflict: false };
     }
     case "validateStarted":
       return { ...s, validating: true, error: null };

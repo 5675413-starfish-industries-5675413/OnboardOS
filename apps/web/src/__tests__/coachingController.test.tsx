@@ -428,7 +428,8 @@ describe("role consistency and navigation wiring", () => {
   it("the identity screen itself is unchanged for an org admin (the membership list is still rendered)", () => {
     const app = read("pages/AppPage.tsx");
     expect(app).toContain("Your role is determined by the server and cannot be changed from this page.");
-    expect(app).toContain("Organization ID:");
+    expect(app).toContain("displayOrganizationName(m.organizationName)");
+    expect(app).not.toContain("Organization ID:");
   });
 
   it("the coaching page does nothing with the flag off, not even a request, and warns before leaving with unsaved changes", () => {

@@ -75,6 +75,14 @@ describe("initiateLogin (authorization request)", () => {
     // The verifier itself must never be sent in the authorization request.
     expect(location.href).not.toContain(verifier);
   });
+
+  it("does not redirect when the page is opened through 127.0.0.1", async () => {
+    location.origin = "http://127.0.0.1:5173";
+    location.href = "http://127.0.0.1:5173/";
+    await expect(initiateLogin()).rejects.toThrow(/localhost:5173/);
+    expect(location.href).toBe("http://127.0.0.1:5173/");
+    expect(storage.getItem(KEYS.oauthState)).toBeNull();
+  });
 });
 
 describe("handleCallback (token exchange)", () => {
