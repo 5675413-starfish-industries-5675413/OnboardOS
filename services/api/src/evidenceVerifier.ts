@@ -86,7 +86,8 @@ export type ContradictionKind =
   | "AI_CLAIMS_ACTION"
   | "SUBMITTED_WITHOUT_SUBMISSION"
   | "APPROVED_WITHOUT_APPROVAL"
-  | "CONFIG_VALUE_MISSTATED";
+  | "CONFIG_VALUE_MISSTATED"
+  | "NUMERIC_COMPARISON_FALSE";
 
 export interface Contradiction {
   kind: ContradictionKind;
@@ -200,6 +201,54 @@ export type ReplyDisposition =
 export function disposeReply(reply: { text: string; truncated: boolean }, facts: VerifiedFacts, maxChars: number): ReplyDisposition {
   const text = reply.text.length > maxChars ? reply.text.slice(0, maxChars) : reply.text;
   const contradictions = verifyReply(text, facts);
+  if (contradictions.length > 0) return { visible: "WITHHELD_UNVERIFIED", text: null, truncated: false, contradictions };
+  return { visible: "ANSWER", text, truncated: reply.truncated || text.length < reply.text.length, contradictions: [] };
+}
+
+// -- v3.1: arithmetic on the reply's own explicit comparisons ---------------------------------------------------
+
+const UNIT_NORM: Record<string, string> = { ms: "ms", millisecond: "ms", milliseconds: "ms", s: "s", second: "s", seconds: "s", "%": "%", percent: "%" };
+const GREATER = "exceeds?|exceeded|is above|are above|is higher than|are higher than|is greater than|is more than|is over|is longer than|is larger than";
+const LESS = "is below|are below|is lower than|are lower than|is less than|is under|is shorter than|is smaller than";
+const QUANTITY = "(\\d[\\d,]*(?:\\.\\d+)?)\\s*(ms|milliseconds?|seconds?|s\\b|%|percent)";
+const COMPARISON = new RegExp(`${QUANTITY}\\s+(?:[\\w-]+\\s+){0,3}?(${GREATER}|${LESS})\\s+(?:(?:the|your|a|an|its|that|this)\\s+)?(?:[\\w-]+\\s+){0,2}?${QUANTITY}`, "gi");
+
+/**
+ * Flags an explicit statement of the form "<number><unit> ... is above/below ... <number><unit>" whose arithmetic is false
+ * ("1540 ms is above 1800 ms"). Both numbers must carry the SAME unit; bare numbers ("batch 3 ... 5 percent") are never compared, so
+ * identifiers cannot be mistaken for quantities. It checks the reply's own arithmetic only: it does not know whether the quantities are
+ * the right ones, and a relation stated without two numbers in one sentence ("the latency exceeds this value") is not examined.
+ */
+export function falseNumericComparisons(sentence: string): boolean {
+  const text = sentence.replace(/[()`*_;:]/g, " ").replace(/,(?=\s)/g, "");
+  COMPARISON.lastIndex = 0;
+  for (let m = COMPARISON.exec(text); m; m = COMPARISON.exec(text)) {
+    const a = Number((m[1] as string).replace(/,/g, ""));
+    const b = Number((m[4] as string).replace(/,/g, ""));
+    const ua = UNIT_NORM[(m[2] as string).toLowerCase()];
+    const ub = UNIT_NORM[(m[5] as string).toLowerCase()];
+    if (!ua || ua !== ub || !Number.isFinite(a) || !Number.isFinite(b)) continue;
+    const op = (m[3] as string).toLowerCase();
+    const claimsGreater = new RegExp(`^(?:${GREATER})$`, "i").test(op);
+    if (claimsGreater ? !(a > b) : !(a < b)) return true;
+  }
+  return false;
+}
+
+/** v3 contradictions plus false explicit numeric comparisons. */
+export function verifyReplyV31(reply: string, facts: VerifiedFacts): Contradiction[] {
+  const found = new Set<ContradictionKind>(verifyReply(reply, facts).map((x) => x.kind));
+  for (const s of sentences(reply)) {
+    if (s.endsWith("?") || NOT_A_STATEMENT.test(s)) continue;
+    if (falseNumericComparisons(s)) found.add("NUMERIC_COMPARISON_FALSE");
+  }
+  return [...found].map((kind) => ({ kind }));
+}
+
+/** The v3.1 decision about a provider reply (see disposeReply). Used by the chat route and the v3.1 evaluation. */
+export function disposeReplyV31(reply: { text: string; truncated: boolean }, facts: VerifiedFacts, maxChars: number): ReplyDisposition {
+  const text = reply.text.length > maxChars ? reply.text.slice(0, maxChars) : reply.text;
+  const contradictions = verifyReplyV31(text, facts);
   if (contradictions.length > 0) return { visible: "WITHHELD_UNVERIFIED", text: null, truncated: false, contradictions };
   return { visible: "ANSWER", text, truncated: reply.truncated || text.length < reply.text.length, contradictions: [] };
 }

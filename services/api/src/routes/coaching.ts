@@ -57,7 +57,8 @@ import {
   type VersionRecord,
 } from "../coachingStore.js";
 import { DEFAULT_COACHING_PROFILE, ScenarioCoachingProfileSchema } from "../coachingProfile.js";
-import { contentHash, describeCoachingBehaviour } from "../coworkerContext.js";
+import { contentHash } from "../coworkerContext.js";
+import { describeCoachingBehaviourV31 } from "../coworkerContextV31.js";
 import type { ApiDeps } from "../deps.js";
 import { HttpError, json, parseBody, pathParam, type HttpResult } from "../http.js";
 import { cancellationCodes, isTransactionCanceled } from "../repo.js";
@@ -254,7 +255,7 @@ export async function handleValidateCoaching(event: APIGatewayProxyEventV2, deps
   const v = validateContent(orgId, scenario.content.scenarioId, body.content, 1);
   return json(
     200,
-    ValidateCoachingResponseSchema.parse({ valid: v.valid, errors: v.errors, effective: describeCoachingBehaviour(body.content.coaching), notice: VALIDATION_NOTICE }),
+    ValidateCoachingResponseSchema.parse({ valid: v.valid, errors: v.errors, effective: describeCoachingBehaviourV31(body.content.coaching), notice: VALIDATION_NOTICE }),
   );
 }
 

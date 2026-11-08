@@ -109,3 +109,15 @@ export function frameFollowUp(kind: FollowUpKind, employeeText: string, previous
       `PREVIOUS ANSWER:\n<<<\n${prev}\n>>>`,
   };
 }
+
+/**
+ * coworker v3.1: a bare follow-up with NO earlier answer to refer to is answered by the platform, not the model. The reply is fixed,
+ * scenario-independent and invents nothing. The turn still goes through the normal reservation (ordering, idempotency, quota,
+ * authorization are unchanged); only the paid model call is skipped.
+ */
+export const PLATFORM_CLARIFICATION =
+  "I don't have an earlier answer of mine to go back to yet. Tell me which part of the task or the materials you would like explained, or ask your question in full, and I will help.";
+
+export function platformClarification(followUp: { kind: FollowUpKind; resolved: boolean } | null): string | null {
+  return followUp !== null && !followUp.resolved ? PLATFORM_CLARIFICATION : null;
+}

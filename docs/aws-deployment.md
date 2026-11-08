@@ -1385,3 +1385,17 @@ The frontend is a separate step and stays behind its build-time flags (`VITE_COA
 
 ### Not verified on AWS
 No model was invoked for v3. The v3 evaluation has not run. `AI_UNVERIFIED` has never occurred against real output. The browser, Cognito, API Gateway and DynamoDB path with v3 is untested.
+
+## Coworker v3.1 (PREPARED LOCALLY, NOT DEPLOYED, NOT EVALUATED AGAINST A MODEL)
+
+Branch `feat/coworker-v3-1-grounding` (from `641dc95`). See `docs/ai-coworker-architecture.md` section 9. The unexecuted change set `samcli-deploy1794139934` still contains coworker-v2 and must not be executed; it was neither touched nor replaced.
+
+### Two comparisons (not to be confused)
+1. **Incremental, `641dc95` (v3) to v3.1:** API function code only. Runner and Smoke bundles are byte-identical (`614664d077dc`, `ddc0e860eeec`); the API bundle changes (`53d8c6e0878d` to `ab8d628500e2`). No change to `packages/contracts`, the web app, `infrastructure/template.yaml`, IAM, routes, parameters, tables or the model id. The only data-model change is an OPTIONAL `answerSource` attribute on chat turn items (read by this code, ignored by older code, not exposed to the browser).
+2. **Actual release, deployed `onboardos-dev` to M1 + v3.1:** unchanged by v3.1. The acceptance criteria written under "Coworker v3" above apply exactly: Modify API function, Modify ScenarioRunner (code differs from the deployed runner because of M1), Modify HTTP API (six coaching endpoints), Add six Lambda permissions, optionally the dynamic-reference `OnboardOSApiRole` modification with an unchanged processed policy; nothing else, and no replacement, deletion, table, Cognito or unauthorised IAM change.
+
+### Behavioural note for operators
+A bare follow-up with no earlier answer no longer calls Bedrock; it still consumes one turn of the session allowance and writes one chat turn item.
+
+### Not verified on AWS
+No model was invoked. `AI_UNVERIFIED` and the platform clarification have never run against real AWS, Cognito or DynamoDB.

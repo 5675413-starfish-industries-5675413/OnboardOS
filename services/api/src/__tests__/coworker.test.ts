@@ -126,7 +126,7 @@ describe("asking a question", () => {
     const res = await askCoworker(api, PEOPLE.empA, sessionId, "q");
     expect(turnItems()[0]).toMatchObject({
       status: "COMPLETE", usageTokens: { input: 120, output: 30 }, providerRequestId: "bedrock-req-1", stopReason: "end_turn",
-      latencyMs: 210, promptVersion: "coworker-v3", employeeSub: PEOPLE.empA.sub,
+      latencyMs: 210, promptVersion: "coworker-v3.1", employeeSub: PEOPLE.empA.sub,
     });
     expect(res.raw).not.toMatch(/bedrock-req|usageTokens|promptVersion|providerRequestId|stopReason|latencyMs/);
     expect(res.raw).not.toContain(PEOPLE.empA.sub);
@@ -1042,8 +1042,8 @@ describe("conversation context through the real route", () => {
 
   it("an identical retry is still answered from the ledger with no second model call", async () => {
     const key = newKey();
-    await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.", key);
-    const retry = await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.", key);
+    await askCoworker(api, PEOPLE.empA, sessionId, "Where do I start?", key);
+    const retry = await askCoworker(api, PEOPLE.empA, sessionId, "Where do I start?", key);
     expect(retry.status).toBe(200);
     expect(retry.body.created).toBe(false);
     expect(calls()).toHaveLength(1);
@@ -1058,7 +1058,7 @@ describe("each turn records which coaching policy built its request", () => {
       coachingProfileVersion: 1,
       coachingProfileSource: "BUILTIN",
       coachingProfileHash: "sha256:0f6af6460ca534f788a1731d6a8f970125230397e9bb0768c046009c9a34830d",
-      promptVersion: "coworker-v3",
+      promptVersion: "coworker-v3.1",
     });
     expect(JSON.stringify(res.body)).not.toMatch(/coachingProfile|builtin-inc-104/);
     expect(JSON.stringify((await listCoworker(api, PEOPLE.empA, sessionId)).body)).not.toMatch(/coachingProfile|builtin-inc-104/);

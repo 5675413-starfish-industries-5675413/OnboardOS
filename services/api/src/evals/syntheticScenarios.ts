@@ -121,3 +121,19 @@ export function scenarioArgs(sc: PublishedScenario) {
     runbookTitle: c.runbook.title, runbookBody: c.runbook.sections[0]!.body, diagTitle: c.diagnostics.title, diagMessages: c.diagnostics.entries.map((e) => e.message), baselineMs: 1,
   };
 }
+/**
+ * A synthetic copy of `sc` whose diagnostics carry TYPED upstream-latency observations (`upstreamLatencyMs`), one per value, so grounding
+ * can be exercised in a domain other than INC-104. Added for the v3.1 evaluation; existing exports are untouched.
+ */
+export function withLatencies(sc: PublishedScenario, id: string, values: readonly number[], coaching?: ScenarioCoachingProfile): PublishedScenario {
+  const entries = values.map((v, i) => ({
+    timestamp: `2026-11-05T09:0${i}:00Z`, level: "INFO" as const, service: "scanner-api", message: `POST /v1/sync completed in ${v}ms`, upstreamLatencyMs: v, httpStatus: 200,
+  }));
+  const made: PublishedScenario = {
+    ...sc,
+    content: { ...sc.content, scenarioId: id, diagnostics: { ...sc.content.diagnostics, entries: [...sc.content.diagnostics.entries, ...entries] } },
+  };
+  const profile = coaching ?? (PROFILES.get(sc) as ScenarioCoachingProfile | undefined);
+  if (profile) PROFILES.set(made, profile);
+  return made;
+}

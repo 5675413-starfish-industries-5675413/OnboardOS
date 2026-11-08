@@ -43,8 +43,9 @@ import {
 } from "../bedrock.js";
 import { resolveCoachingForAssignment } from "../coachingRuntime.js";
 import type { PriorTurn } from "../coworkerContext.js";
-import { COWORKER_PROMPT_VERSION_V3, buildCoworkerRequestV3, type BuiltRequestV3 } from "../coworkerContextV3.js";
-import { buildVerifiedFacts, disposeReply } from "../evidenceVerifier.js";
+import { COWORKER_PROMPT_VERSION_V31, buildCoworkerRequestV31, type BuiltRequestV31 } from "../coworkerContextV31.js";
+import { platformClarification } from "../followUp.js";
+import { buildVerifiedFacts, disposeReplyV31 } from "../evidenceVerifier.js";
 import {
   FRESH_CONTROL,
   LEASE_MS,
@@ -227,7 +228,7 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
 
   // -- reserve ---------------------------------------------------------------
   let turn: TurnRecord | null = null;
-  let pendingRequest: BuiltRequestV3 | null = null;
+  let pendingRequest: BuiltRequestV31 | null = null;
   let facts = null as ReturnType<typeof buildVerifiedFacts> | null;
   let current = state;
 
@@ -253,7 +254,7 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
     const currentRun = await currentRunFor(deps, current, scenario.testSuiteVersion);
     // Facts the model is shown AND the facts its reply is checked against: the same server records, read once.
     facts = buildVerifiedFacts({ state: current, baseline: scenario.content.initialConfig, currentRun, assignmentStatus: assignment.status });
-    const request = buildCoworkerRequestV3({ scenario, coaching: coaching.profile, state: current, currentRun, history, message, facts });
+    const request = buildCoworkerRequestV31({ scenario, coaching: coaching.profile, state: current, currentRun, history, message, facts });
 
     // A previous holder whose lease expired is closed in the same transaction.
     let stranded: { turnId: string; code: string; message: string } | null = null;
@@ -271,9 +272,10 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       employeeSub: sub,
       turnId,
       userText: message,
-      modelId: provider.modelId,
-      promptVersion: COWORKER_PROMPT_VERSION_V3,
+      modelId: platformClarification(request.followUp) !== null ? "platform" : provider.modelId,
+      promptVersion: COWORKER_PROMPT_VERSION_V31,
       followUpKind: request.followUp?.kind ?? null,
+      answerSource: platformClarification(request.followUp) !== null ? "PLATFORM_CLARIFICATION" : "MODEL",
       coaching: {
         profileId: coaching.profile.profileId,
         profileVersion: coaching.profile.profileVersion,
@@ -323,37 +325,44 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
 
   // -- call (only the reservation winner reaches here) -------------------------
   let outcome: TurnOutcome;
+  const clarification = platformClarification(pendingRequest.followUp);
   try {
-    const reply = await provider.converse(pendingRequest.request);
-    // The model is not the source of truth for tests, saved configuration, progress or review. Before anything is stored or shown,
-    // the reply is checked against the same verified facts the model was given. A material contradiction withholds the reply: it is
-    // not corrected, no replacement evidence is invented, and nothing about the session changes. (A bounded check, not a guarantee.)
-    // The decision is made by disposeReply, the same function the v3 evaluation uses. Missing facts fail CLOSED (an error, never an unchecked answer).
-    if (!facts) throw new Error("verified facts unavailable");
-    const shown = disposeReply(reply, facts, COWORKER_MAX_REPLY_CHARS);
-    if (shown.visible === "WITHHELD_UNVERIFIED") {
-      console.error(
-        JSON.stringify({
-          event: "coworker_reply_withheld",
-          turnId: turn.turnId,
-          kinds: shown.contradictions.map((x) => x.kind),
-          requestId: reply.requestId,
-          inputTokens: reply.inputTokens,
-          outputTokens: reply.outputTokens,
-          promptVersion: COWORKER_PROMPT_VERSION_V3,
-        }),
-      );
-      outcome = { kind: "ERROR", code: "AI_UNVERIFIED", message: COWORKER_ERROR_MESSAGES.AI_UNVERIFIED, requestId: reply.requestId };
+    if (clarification !== null) {
+      // No earlier answer exists for a bare follow-up to refer to: the platform answers with a fixed, scenario-independent
+      // clarification. No model call is made and nothing is invented. The turn was reserved normally (ordering, idempotency, quota).
+      outcome = { kind: "COMPLETE", reply: clarification, truncated: false, usage: { input: 0, output: 0 }, requestId: null, stopReason: "platform_clarification", latencyMs: 0 };
     } else {
-      outcome = {
-        kind: "COMPLETE",
-        reply: shown.text,
-        truncated: shown.truncated,
-        usage: { input: reply.inputTokens, output: reply.outputTokens },
-        requestId: reply.requestId,
-        stopReason: reply.stopReason,
-        latencyMs: reply.latencyMs,
-      };
+      const reply = await provider.converse(pendingRequest.request);
+      // The model is not the source of truth for tests, saved configuration, progress or review. Before anything is stored or shown,
+      // the reply is checked against the same verified facts the model was given. A material contradiction withholds the reply: it is
+      // not corrected, no replacement evidence is invented, and nothing about the session changes. (A bounded check, not a guarantee.)
+      // The decision is made by disposeReplyV31, the same function the v3.1 evaluation uses. Missing facts fail CLOSED (an error, never an unchecked answer).
+      if (!facts) throw new Error("verified facts unavailable");
+      const shown = disposeReplyV31(reply, facts, COWORKER_MAX_REPLY_CHARS);
+      if (shown.visible === "WITHHELD_UNVERIFIED") {
+        console.error(
+          JSON.stringify({
+            event: "coworker_reply_withheld",
+            turnId: turn.turnId,
+            kinds: shown.contradictions.map((x) => x.kind),
+            requestId: reply.requestId,
+            inputTokens: reply.inputTokens,
+            outputTokens: reply.outputTokens,
+            promptVersion: COWORKER_PROMPT_VERSION_V31,
+          }),
+        );
+        outcome = { kind: "ERROR", code: "AI_UNVERIFIED", message: COWORKER_ERROR_MESSAGES.AI_UNVERIFIED, requestId: reply.requestId };
+      } else {
+        outcome = {
+          kind: "COMPLETE",
+          reply: shown.text,
+          truncated: shown.truncated,
+          usage: { input: reply.inputTokens, output: reply.outputTokens },
+          requestId: reply.requestId,
+          stopReason: reply.stopReason,
+          latencyMs: reply.latencyMs,
+        };
+      }
     }
   } catch (err) {
     const code: CoworkerErrorCode = err instanceof CoworkerProviderError ? err.code : "AI_ERROR";
@@ -378,7 +387,8 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       requestId: outcome.requestId,
       latencyMs: outcome.kind === "COMPLETE" ? outcome.latencyMs : null,
       modelId: provider.modelId,
-      promptVersion: COWORKER_PROMPT_VERSION_V3,
+      promptVersion: COWORKER_PROMPT_VERSION_V31,
+      answerSource: turn.answerSource ?? "MODEL",
       coachingProfileId: turn.coachingProfileId ?? null,
       coachingProfileVersion: turn.coachingProfileVersion ?? null,
       coachingProfileSource: turn.coachingProfileSource ?? null,
@@ -404,7 +414,8 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
 async function historyFor(deps: ApiDeps, sessionId: string): Promise<PriorTurn[]> {
   const out: PriorTurn[] = [];
   for (const t of await loadTurns(deps, sessionId)) {
-    if (t.status === "COMPLETE" && t.replyText) out.push({ userText: t.userText, reply: t.replyText });
+    // A platform clarification carries no content to refer back to, so it is not an "earlier answer" for follow-ups or for the model.
+    if (t.status === "COMPLETE" && t.replyText && t.answerSource !== "PLATFORM_CLARIFICATION") out.push({ userText: t.userText, reply: t.replyText });
   }
   return out;
 }

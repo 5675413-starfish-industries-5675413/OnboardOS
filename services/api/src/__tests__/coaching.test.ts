@@ -593,7 +593,7 @@ describe("coworker runtime", () => {
     const turn = api.db.all(CORE).find((i) => i["entityType"] === "COWORKER_TURN")!;
     expect(turn).toMatchObject({
       coachingProfileSource: "ORG_PUBLISHED", coachingProfileId: profileIdFor(ORG, SC), coachingProfileVersion: 1,
-      coachingProfileHash: pub.body.version.contentHash, promptVersion: "coworker-v3",
+      coachingProfileHash: pub.body.version.contentHash, promptVersion: "coworker-v3.1",
     });
     expect(logs.find((l) => l.includes("coworker_turn"))).toContain('"coachingProfileSource":"ORG_PUBLISHED"');
   });

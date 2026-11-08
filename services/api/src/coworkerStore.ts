@@ -117,6 +117,8 @@ const TurnSchema = z
     coachingProfileSource: z.enum(["BUILTIN", "PLATFORM_DEFAULT", "INVALID_FALLBACK", "ORG_PUBLISHED"]).optional(),
     /** coworker-v3: the kind of bare follow-up the message was recognised as, when it was (audit only). */
     followUpKind: z.enum(["SIMPLIFY", "CLARIFY", "ELABORATE", "SHORTEN", "JUSTIFY"]).optional(),
+    /** coworker-v3.1: absent or MODEL = a model produced the reply; PLATFORM_CLARIFICATION = the fixed no-referent clarification (no model call). */
+    answerSource: z.enum(["MODEL", "PLATFORM_CLARIFICATION"]).optional(),
     createdAt: z.string(),
     completedAt: z.string().nullable(),
     errorCode: z.string().nullable(),
@@ -154,6 +156,7 @@ export function buildPendingTurn(input: {
   modelId: string;
   promptVersion: string;
   followUpKind?: "SIMPLIFY" | "CLARIFY" | "ELABORATE" | "SHORTEN" | "JUSTIFY" | null;
+  answerSource?: "MODEL" | "PLATFORM_CLARIFICATION";
   coaching?: { profileId: string; profileVersion: number; hash: string; source: "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" | "ORG_PUBLISHED" };
   now: string;
 }): TurnRecord {
@@ -171,6 +174,7 @@ export function buildPendingTurn(input: {
     modelId: input.modelId,
     promptVersion: input.promptVersion,
     ...(input.followUpKind ? { followUpKind: input.followUpKind } : {}),
+    ...(input.answerSource ? { answerSource: input.answerSource } : {}),
     ...(input.coaching
       ? {
           coachingProfileId: input.coaching.profileId,
