@@ -16,6 +16,7 @@ export const REJECTION_STATUS: Record<Rejection["code"], { status: number; code:
   RUN_IN_PROGRESS: { status: 409, code: "RUN_IN_PROGRESS" },
   RUN_LIMIT_REACHED: { status: 429, code: "RUN_LIMIT_REACHED" },
   REVISION_LIMIT_REACHED: { status: 429, code: "REVISION_LIMIT_REACHED" },
+  ALREADY_DECIDED: { status: 409, code: "ALREADY_DECIDED" },
   // The API authorizes ownership first, so these indicate a bug or tampering: do not explain.
   NOT_OWNER: { status: 404, code: "NOT_FOUND" },
   NOT_AUTHORIZED: { status: 404, code: "NOT_FOUND" },

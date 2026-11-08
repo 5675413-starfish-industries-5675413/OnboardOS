@@ -52,6 +52,15 @@
       .lvl-ERROR { color: #b91c1c; font-weight: 600; } .lvl-WARN { color: #b45309; font-weight: 600; }
       .comment { border-left: 3px solid #cbd5e1; padding-left: .8rem; margin: .8rem 0; }
       input[type="number"] { font: inherit; padding: .45rem .6rem; border: 1px solid #cbd5e1; border-radius: 6px; width: 9rem; }
+      textarea { font: inherit; width: 100%; padding: .55rem .65rem; border: 1px solid #cbd5e1; border-radius: 6px; resize: vertical; line-height: 1.45; }
+      textarea:focus-visible, input[type="radio"]:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
+      textarea[aria-invalid="true"] { border-color: #b91c1c; }
+      fieldset { border: 1px solid #e2e8f0; border-radius: 6px; padding: .7rem 1rem; margin-bottom: .9rem; }
+      legend { font-size: .85rem; color: #475569; padding: 0 .35rem; }
+      .radio { display: flex; align-items: center; gap: .5rem; margin: .3rem 0; font-size: .95rem; color: #1e293b; }
+      .timeline { list-style: none; border-left: 2px solid #cbd5e1; margin-left: .4rem; }
+      .timeline li { padding: .25rem 0 .25rem .9rem; position: relative; }
+      .timeline li::before { content: ""; position: absolute; left: -.42rem; top: .7rem; width: .65rem; height: .65rem; border-radius: 50%; background: #64748b; }
       input[type="number"]:focus-visible { outline: 3px solid #1d4ed8; outline-offset: 2px; }
       .pill-bad { background: #fee2e2; color: #991b1b; }
       .pill-stale { background: #e2e8f0; color: #475569; border: 1px dashed #94a3b8; }

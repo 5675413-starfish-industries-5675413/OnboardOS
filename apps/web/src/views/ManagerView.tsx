@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import type { AssignableEmployee, AssignmentView } from "@onboardos/contracts";
 import { createAssignment, listAssignableEmployees, listAssignments } from "../lib/api.js";
-import { describeApiError, hasAssignment, mergeAssignment } from "../lib/views.js";
-
-function statusLabel(status: AssignmentView["status"]): string {
-  return status === "IN_PROGRESS" ? "In progress" : status === "ASSIGNED" ? "Assigned" : status;
-}
+import {
+  assignmentStatusLabel,
+  assignmentStatusTone,
+  describeApiError,
+  hasAssignment,
+  mergeAssignment,
+  reviewQueue,
+  toneClass,
+} from "../lib/views.js";
 
 /**
  * Manager: assign INC-104 to an employee on their team and see the persisted
@@ -60,6 +65,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
   }
 
   const alreadyAssigned = selected !== "" && hasAssignment(assignments, selected);
+  const queue = reviewQueue(assignments);
 
   return (
     <>
@@ -97,6 +103,50 @@ export function ManagerView({ orgId }: { orgId: string }) {
         {error && <div className="error" role="alert">{error}</div>}
       </div>
 
+      <div className="card" data-testid="review-queue">
+        <div className="row">
+          <h2>Review queue</h2>
+          <button className="btn btn-sm" onClick={() => void load()} disabled={busy}>Refresh</button>
+        </div>
+        {queue.waiting.length === 0 ? (
+          <p className="muted">Nothing is waiting for your review. New submissions can take a moment to appear; press Refresh.</p>
+        ) : (
+          <table className="data">
+            <caption className="sr-only">Submissions awaiting your review</caption>
+            <thead>
+              <tr><th scope="col">Employee</th><th scope="col">Incident</th><th scope="col">Attempt</th><th scope="col"><span className="sr-only">Review</span></th></tr>
+            </thead>
+            <tbody>
+              {queue.waiting.map((a) => (
+                <tr key={a.assignmentId}>
+                  <td>{a.employee?.displayName ?? "—"}</td>
+                  <td>{a.scenarioTitle}</td>
+                  <td>{a.attemptNumber}</td>
+                  <td>
+                    <Link className="btn btn-sm" to={`/reviews/${encodeURIComponent(a.latestSubmissionId ?? "")}`}>
+                      Review
+                    </Link>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {queue.decided.length > 0 && (
+          <p className="muted">
+            Decided:{" "}
+            {queue.decided.map((a, i) => (
+              <span key={a.assignmentId}>
+                {i > 0 && " · "}
+                <Link to={`/reviews/${encodeURIComponent(a.latestSubmissionId ?? "")}`}>
+                  {a.employee?.displayName ?? "Employee"} (attempt {a.attemptNumber}, {assignmentStatusLabel(a.status).toLowerCase()})
+                </Link>
+              </span>
+            ))}
+          </p>
+        )}
+      </div>
+
       <div className="card">
         <div className="row">
           <h2>Your assignments</h2>
@@ -121,8 +171,8 @@ export function ManagerView({ orgId }: { orgId: string }) {
                   <td>{a.employee?.displayName ?? "—"}</td>
                   <td>{a.scenarioTitle}</td>
                   <td>
-                    <span className={a.status === "IN_PROGRESS" ? "pill pill-progress" : "pill"}>
-                      {statusLabel(a.status)}
+                    <span className={toneClass(assignmentStatusTone(a.status))}>
+                      {assignmentStatusLabel(a.status)}
                     </span>
                   </td>
                   <td className="muted">{new Date(a.createdAt).toLocaleString()}</td>

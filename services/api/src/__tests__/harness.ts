@@ -204,6 +204,9 @@ export const R = {
   saveConfig: "PUT /v1/sessions/{sessionId}/config",
   runTests: "POST /v1/sessions/{sessionId}/test-runs",
   getRun: "GET /v1/sessions/{sessionId}/test-runs/{runId}",
+  submit: "POST /v1/sessions/{sessionId}/submissions",
+  review: "GET /v1/reviews/{submissionId}",
+  decide: "POST /v1/reviews/{submissionId}/decision",
 } as const;
 
 export const assign = (api: Api, by: Person, employee: Person, org = ORG) =>
@@ -234,4 +237,94 @@ export async function startedSession(api: Api) {
   const assignmentId: string = a.body.assignment.assignmentId;
   const s = await startAs(api, PEOPLE.empA, assignmentId);
   return { assignmentId, sessionId: s.body.session.sessionId as string, session: s.body.session, startRes: s };
+}
+
+// -- Phase 2D helpers -----------------------------------------------------------
+
+export const REPORT = {
+  rootCause: "The checkout client timeout of 800 ms is shorter than the payments upstream's slow responses.",
+  correctiveAction: "Raised request_timeout_ms so slow upstream responses complete before the client gives up.",
+  verification: "Saved the new revision and ran the predefined test suite on AWS Lambda against it.",
+  remainingRisks: "A longer timeout can hold connections open longer; monitor saturation and upstream latency.",
+} as const;
+
+let keyCounter = 0;
+/** A fresh, valid Idempotency-Key. */
+export const newKey = (): string => `key-${String(++keyCounter).padStart(6, "0")}-abcdef`;
+
+export interface SubmitOverrides {
+  key?: string | null;
+  expectedStateVersion?: number;
+  testRunId?: string;
+  configRevision?: number;
+  configHash?: string;
+  report?: unknown;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Submit as the employee, building the request from what the employee's own page shows (the
+ * session read back from the API). Overrides let tests forge any part of it.
+ */
+export async function submitReport(api: Api, who: Person | string, sessionId: string, o: SubmitOverrides = {}) {
+  const view = (await api.call({ route: R.session, as: who, params: { sessionId } })).body?.session;
+  const body = {
+    expectedStateVersion: o.expectedStateVersion ?? view?.stateVersion ?? 0,
+    testRunId: o.testRunId ?? view?.currentEvidence?.testRunId ?? "run_0001_000000000000",
+    configRevision: o.configRevision ?? view?.configRevision ?? 0,
+    configHash: o.configHash ?? view?.configHash ?? "sha256:" + "0".repeat(64),
+    report: o.report ?? REPORT,
+    ...o.extra,
+  };
+  const key = o.key === undefined ? newKey() : o.key;
+  return api.call({
+    route: R.submit,
+    as: who,
+    params: { sessionId },
+    body,
+    headers: key === null ? {} : { "idempotency-key": key },
+  });
+}
+
+export const decide = (api: Api, who: Person | string, submissionId: string, body: unknown) =>
+  api.call({ route: R.decide, as: who, params: { submissionId }, body });
+
+export const getReview = (api: Api, who: Person | string, submissionId: string) =>
+  api.call({ route: R.review, as: who, params: { submissionId } });
+
+/** Assign, start, save `ms` (unless it is the 800 baseline) and run the tests: a session ready to submit. */
+export async function readyToSubmit(
+  api: Api,
+  ms = 1800,
+  employee: Person = PEOPLE.empA,
+  manager: Person = PEOPLE.mgrA,
+  org = ORG,
+) {
+  const a = await assign(api, manager, employee, org);
+  const assignmentId: string = a.body.assignment.assignmentId;
+  const s = await startAs(api, employee, assignmentId);
+  const sessionId: string = s.body.session.sessionId;
+  let version: number = s.body.session.stateVersion;
+  if (ms !== 800) {
+    const saved = await saveConfig(api, employee, sessionId, version, ms);
+    version = saved.body.session.stateVersion;
+  }
+  const run = await runTests(api, employee, sessionId, version);
+  return { assignmentId, sessionId, run, runId: run.body.testRun.testRunId as string };
+}
+
+/**
+ * Work on the CURRENT attempt of an existing session until it is submitted: save `ms` (when it differs),
+ * run the tests and submit. Returns the submission id.
+ */
+export async function finishAttempt(api: Api, who: Person, sessionId: string, ms: number): Promise<string> {
+  let view = (await api.call({ route: R.session, as: who, params: { sessionId } })).body.session;
+  if (view.config.request_timeout_ms !== ms) {
+    view = (await saveConfig(api, who, sessionId, view.stateVersion, ms)).body.session;
+  }
+  const run = await runTests(api, who, sessionId, view.stateVersion);
+  if (run.status !== 201) throw new Error(`run failed: ${run.status} ${run.raw}`);
+  const sub = await submitReport(api, who, sessionId);
+  if (sub.status !== 201) throw new Error(`submit failed: ${sub.status} ${sub.raw}`);
+  return sub.body.submission.submissionId as string;
 }

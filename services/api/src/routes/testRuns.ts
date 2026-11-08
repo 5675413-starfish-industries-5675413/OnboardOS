@@ -116,7 +116,7 @@ export async function handleSaveConfig(event: APIGatewayProxyEventV2, deps: ApiD
     throw err;
   }
 
-  const history = await loadHistory(deps.db, state.sessionId);
+  const history = await loadHistory(deps.db, state.sessionId, state.assignmentId);
   return json(200, SaveConfigResponseSchema.parse({ session: toSessionView(result.nextState, scenario, history) }));
 }
 
@@ -187,7 +187,7 @@ async function reconcileStranded(deps: ApiDeps, state: WorkplaceState): Promise<
 async function respondWithRun(deps: ApiDeps, sessionId: string, testRunId: string, status: number): Promise<HttpResult> {
   const state = await reloadState(deps, sessionId);
   const scenario = scenarioFor(state.scenarioId, state.scenarioVersion);
-  const history = await loadHistory(deps.db, sessionId);
+  const history = await loadHistory(deps.db, sessionId, state.assignmentId);
   const run = history.runs.find((r) => r.testRunId === testRunId);
   if (!run) throw INTERNAL("test run is missing or malformed");
   return json(

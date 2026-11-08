@@ -3,6 +3,7 @@ import { LoginPage } from "./pages/LoginPage.js";
 import { CallbackPage } from "./pages/CallbackPage.js";
 import { AppPage } from "./pages/AppPage.js";
 import { SessionPage } from "./pages/SessionPage.js";
+import { ReviewPage } from "./pages/ReviewPage.js";
 import { getSession } from "./lib/auth.js";
 
 /**
@@ -12,6 +13,8 @@ import { getSession } from "./lib/auth.js";
  *   /           → LoginPage (public)
  *   /callback   → CallbackPage (Cognito PKCE redirect target)
  *   /app        → AppPage (requires active session, redirects to / if not)
+ *   /sessions/:id → SessionPage (the employee's workplace)
+ *   /reviews/:id  → ReviewPage (manager evidence + decision; the API authorizes every call)
  *   *           → redirect to /
  */
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -41,6 +44,14 @@ export default function App() {
           element={
             <ProtectedRoute>
               <SessionPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/reviews/:submissionId"
+          element={
+            <ProtectedRoute>
+              <ReviewPage />
             </ProtectedRoute>
           }
         />

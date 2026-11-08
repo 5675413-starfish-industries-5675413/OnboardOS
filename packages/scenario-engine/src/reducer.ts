@@ -70,6 +70,9 @@ export function createSession(
     configHash: configHash(definition.content.initialConfig),
     testRunsRequested: 0,
     activeTestRunId: null,
+    attemptNumber: init.attemptNumber ?? 1,
+    submissionId: null,
+    reviewDecision: null,
     viewed: { ticket: false, runbook: false, diagnostics: false },
     startedAt: null,
     updatedAt: now,
@@ -91,12 +94,20 @@ export function reduceScenario(
   }
 
   // 2. Authority, before anything that could reveal state to a non-owner.
-  //    System actions need the system identity; client actions need the owner
-  //    and can never be performed by the system identity.
+  //    - System actions need the system identity.
+  //    - Review actions need someone who is NOT the employee and NOT the system identity
+  //      (the API has already verified they are an authorized reviewer; the engine
+  //      additionally forbids self-review).
+  //    - Everything else is a client action: the owner only, never the system identity.
   const isSystemAction = action.type === "RECORD_TEST_RESULT";
+  const isReviewAction = action.type === "RECORD_REVIEW";
   if (isSystemAction) {
     if (ctx.actorSub !== SYSTEM_ACTOR) {
       return reject("NOT_AUTHORIZED", "Only the system can record test results");
+    }
+  } else if (isReviewAction) {
+    if (ctx.actorSub === SYSTEM_ACTOR || ctx.actorSub === state.employeeSub) {
+      return reject("NOT_AUTHORIZED", "A review must come from someone other than the employee");
     }
   } else {
     if (ctx.actorSub === SYSTEM_ACTOR) {
@@ -116,9 +127,12 @@ export function reduceScenario(
     );
   }
 
-  // 4. Bounded growth. Recording a result is exempt: a requested run must
-  //    always be completable, and completions are bounded by MAX_TEST_RUNS.
-  if (!isSystemAction && state.stateVersion >= MAX_STATE_VERSION) {
+  // 4. Bounded growth. Recording a result, submitting and recording a review are exempt:
+  //    a requested run must always be completable, and a session at its action cap must
+  //    still be submittable and reviewable. Each of these happens at most once or is
+  //    bounded (completions by MAX_TEST_RUNS, submit and review once per attempt).
+  const capExempt = isSystemAction || isReviewAction || action.type === "SUBMIT_REPORT";
+  if (!capExempt && state.stateVersion >= MAX_STATE_VERSION) {
     return reject("LIMIT_REACHED", "This session has reached its maximum number of actions");
   }
 
@@ -241,6 +255,49 @@ export function reduceScenario(
           stateVersion: nextVersion,
           updatedAt: ctx.now,
         },
+        events: [event],
+      };
+    }
+
+    case "SUBMIT_REPORT": {
+      if (state.phase !== "INVESTIGATING") {
+        return reject("INVALID_TRANSITION", "This attempt is not open for submission");
+      }
+      if (state.activeTestRunId !== null) {
+        return reject("RUN_IN_PROGRESS", "Wait for the running test to finish before submitting");
+      }
+      const event: DomainEvent = {
+        ...base,
+        type: "SUBMISSION_CREATED",
+        payload: {
+          submissionId: action.submissionId,
+          attemptNumber: state.attemptNumber,
+          configRevision: state.configRevision,
+          configHash: state.configHash,
+        },
+      };
+      return {
+        ok: true,
+        nextState: { ...state, phase: "SUBMITTED", submissionId: action.submissionId, stateVersion: nextVersion, updatedAt: ctx.now },
+        events: [event],
+      };
+    }
+
+    case "RECORD_REVIEW": {
+      if (state.phase !== "SUBMITTED" || state.submissionId === null || state.submissionId !== action.submissionId) {
+        return reject("INVALID_TRANSITION", "That submission is not awaiting review on this attempt");
+      }
+      if (state.reviewDecision !== null) {
+        return reject("ALREADY_DECIDED", "A decision has already been recorded for this submission");
+      }
+      const event: DomainEvent = {
+        ...base,
+        type: "REVIEW_DECIDED",
+        payload: { submissionId: action.submissionId, decision: action.decision },
+      };
+      return {
+        ok: true,
+        nextState: { ...state, reviewDecision: action.decision, stateVersion: nextVersion, updatedAt: ctx.now },
         events: [event],
       };
     }

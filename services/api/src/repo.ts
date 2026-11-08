@@ -186,6 +186,15 @@ export async function transactStartSession(
 }
 
 /** An additional conditional Put on the Core table that must commit atomically with an action. */
+/** A conditional Update on the Core table that must commit atomically with an action (e.g. the assignment). */
+export interface CoreUpdate {
+  key: Item;
+  expression: string;
+  condition: string;
+  names?: Record<string, string>;
+  values: Record<string, unknown>;
+}
+
 export interface CorePut {
   item: Item;
   condition: string;
@@ -214,6 +223,7 @@ export async function transactApplyAction(
     expectedVersion: number;
     employeeSub?: string;
     extraCorePuts?: CorePut[];
+    extraCoreUpdates?: CoreUpdate[];
   },
 ): Promise<void> {
   await db.client.send(
@@ -240,6 +250,16 @@ export async function transactApplyAction(
             ConditionExpression: x.condition,
             ...(x.names ? { ExpressionAttributeNames: x.names } : {}),
             ...(x.values ? { ExpressionAttributeValues: x.values } : {}),
+          },
+        })),
+        ...(p.extraCoreUpdates ?? []).map((u) => ({
+          Update: {
+            TableName: db.coreTable,
+            Key: u.key,
+            UpdateExpression: u.expression,
+            ConditionExpression: u.condition,
+            ...(u.names ? { ExpressionAttributeNames: u.names } : {}),
+            ExpressionAttributeValues: u.values,
           },
         })),
         ...p.eventItems.map((e) => ({
@@ -305,4 +325,125 @@ export async function getTestRunItem(db: Db, sessionId: string, testRunId: strin
     new GetCommand({ TableName: db.coreTable, Key: keys.testRun(sessionId, testRunId), ConsistentRead: true }),
   );
   return r.Item;
+}
+
+// ---------------------------------------------------------------------------
+// Submissions, decisions, idempotency ledger and the evidence timeline
+// ---------------------------------------------------------------------------
+
+const MAX_ATTEMPTS_READ = 10;
+
+export async function getSubmissionItem(db: Db, assignmentId: string, attempt: number): Promise<Item | undefined> {
+  const r = await db.client.send(
+    new GetCommand({ TableName: db.coreTable, Key: keys.submission(assignmentId, attempt), ConsistentRead: true }),
+  );
+  return r.Item;
+}
+
+export async function getDecisionItem(db: Db, assignmentId: string, attempt: number): Promise<Item | undefined> {
+  const r = await db.client.send(
+    new GetCommand({ TableName: db.coreTable, Key: keys.decision(assignmentId, attempt), ConsistentRead: true }),
+  );
+  return r.Item;
+}
+
+/** Every attempt's frozen submission on one assignment, newest first. Single-partition consistent Query. */
+export async function querySubmissions(db: Db, assignmentId: string): Promise<Item[]> {
+  const r = await db.client.send(
+    new QueryCommand({
+      TableName: db.coreTable,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+      ExpressionAttributeValues: { ":pk": `ASSIGN#${assignmentId}`, ":prefix": "SUBMISSION#" },
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: MAX_ATTEMPTS_READ,
+    }),
+  );
+  return r.Items ?? [];
+}
+
+export async function queryDecisions(db: Db, assignmentId: string): Promise<Item[]> {
+  const r = await db.client.send(
+    new QueryCommand({
+      TableName: db.coreTable,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+      ExpressionAttributeValues: { ":pk": `ASSIGN#${assignmentId}`, ":prefix": "DECISION#" },
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: MAX_ATTEMPTS_READ,
+    }),
+  );
+  return r.Items ?? [];
+}
+
+export async function getSubmitLedgerItem(db: Db, sessionId: string, key: string): Promise<Item | undefined> {
+  const r = await db.client.send(
+    new GetCommand({ TableName: db.coreTable, Key: keys.submitLedger(sessionId, key), ConsistentRead: true }),
+  );
+  return r.Item;
+}
+
+/**
+ * One session's events, oldest first, from the Events table. A bounded single-partition
+ * Query (never a Scan); the API role holds `dynamodb:Query` on that table for exactly this.
+ */
+export async function queryEvents(db: Db, sessionId: string, limit = 250): Promise<Item[]> {
+  const r = await db.client.send(
+    new QueryCommand({
+      TableName: db.eventsTable,
+      KeyConditionExpression: "PK = :pk AND begins_with(SK, :prefix)",
+      ExpressionAttributeValues: { ":pk": `SESSION#${sessionId}`, ":prefix": "SEQ#" },
+      ConsistentRead: true,
+      ScanIndexForward: true,
+      Limit: limit,
+    }),
+  );
+  return r.Items ?? [];
+}
+
+/**
+ * Begin attempt N+1 after a revision request: create the new session and its first event, and
+ * move the assignment REVISION_REQUESTED -> IN_PROGRESS pointing at the new session, atomically.
+ * The old session, submission and decision are not touched. The assignment condition pins the
+ * exact previous session, so two concurrent "begin" requests cannot both create an attempt.
+ */
+export async function transactStartNextAttempt(
+  db: Db,
+  p: {
+    sessionItem: Item;
+    firstEventItem: Item;
+    assignmentId: string;
+    previousSessionId: string;
+    newSessionId: string;
+    attemptNumber: number;
+    employeeSub: string;
+    now: string;
+  },
+): Promise<void> {
+  await db.client.send(
+    new TransactWriteCommand({
+      TransactItems: [
+        { Put: { TableName: db.coreTable, Item: p.sessionItem, ConditionExpression: "attribute_not_exists(PK)" } },
+        { Put: { TableName: db.eventsTable, Item: p.firstEventItem, ConditionExpression: "attribute_not_exists(PK)" } },
+        {
+          Update: {
+            TableName: db.coreTable,
+            Key: keys.assignment(p.assignmentId),
+            UpdateExpression: "SET #status = :inProgress, sessionId = :newSession, attemptNumber = :attempt, updatedAt = :now",
+            ConditionExpression: "#status = :revision AND employeeSub = :employeeSub AND sessionId = :previousSession",
+            ExpressionAttributeNames: { "#status": "status" },
+            ExpressionAttributeValues: {
+              ":inProgress": "IN_PROGRESS",
+              ":revision": "REVISION_REQUESTED",
+              ":newSession": p.newSessionId,
+              ":attempt": p.attemptNumber,
+              ":employeeSub": p.employeeSub,
+              ":previousSession": p.previousSessionId,
+              ":now": p.now,
+            },
+          },
+        },
+      ],
+    }),
+  );
 }

@@ -971,3 +971,151 @@ Redeploy the Phase 2B template through the same change-set gate. This removes th
 permissions and the `InvokeFunction` statement, and leaves Cognito and both tables as they are. Stored revisions, runs and the extra state
 fields remain in the Core table (harmless to Phase 2B code, which ignores unknown attributes; its next write to a session drops the
 Phase 2C state fields, leaving revision and run items orphaned but intact). `sam delete` is not a rollback: it deletes the tables.
+
+---
+
+## Phase 2D: frozen submission and human manager review (ONB-10)
+
+**Status: Local. Not committed, not deployed, NOT VERIFIED ON AWS.** Everything here is verified only by unit and
+integration tests against an in-memory DynamoDB and the real handler code (the runner is the real runner handler called
+in-process). No AWS request was made for this phase. **There is no Bedrock in this phase**: every submission records
+`evaluation.status = NOT_CONFIGURED`, and the manager UI says so.
+
+The loop: employee investigates -> runs tests -> submits an incident report -> evidence is frozen -> a manager reads the frozen
+evidence -> approves or requests a revision -> after a revision request the employee begins the next attempt and resubmits.
+
+### Routes added (all JWT-protected; the Lambda authorizes every call against DynamoDB)
+
+| Route | Who | Body | Result |
+|---|---|---|---|
+| `POST /v1/sessions/{sessionId}/submissions` | the session's employee | header `Idempotency-Key` (8-64 of `A-Za-z0-9_-`); `{ expectedStateVersion, testRunId, configRevision, configHash, report{rootCause,correctiveAction,verification,remainingRisks} }` | `201` new / `200` identical replay; `422 EVIDENCE_NOT_CURRENT`, `422 EVIDENCE_NOT_COMPLETED`, `409 EVIDENCE_MISMATCH`, `409 RUN_IN_PROGRESS`, `409 ALREADY_SUBMITTED`, `409 IDEMPOTENCY_CONFLICT`, `409 VERSION_CONFLICT`, `400` shape |
+| `GET /v1/reviews/{submissionId}` | assigning manager; org admin of that org | none | read-only evidence bundle (`submission`, `employee`, `assignment`, `history`, `timeline`, `canDecide`) |
+| `POST /v1/reviews/{submissionId}/decision` | same | `{ decision: APPROVE\|REQUEST_REVISION, feedback? }` | `200`; `409 ALREADY_DECIDED`, `409 NOT_AWAITING_REVIEW`, `422 ATTEMPT_LIMIT_REACHED`, `400` (revision needs >= 10 chars of feedback) |
+| `POST /v1/assignments/{id}/start` (existing) | the assigned employee | none | now also: `REVISION_REQUESTED` -> creates attempt N+1 (`201`); any other started status -> reopens the existing session (`200`) |
+
+Anything unauthorized (unknown id, other tenant, other manager's employee, the employee themself) is the same opaque `404`.
+Request bodies are strict; a forged `status`, `submissionId`, `employeeSub`, `passed`, `reviewerSub`, `rubricVersion`, `evaluation` or `testRun` is a `400`.
+The reviewer's identity is the verified token's subject, never the body.
+
+### What a submission is (server-built, immutable)
+
+The request supplies only the report text and an **assertion** of the evidence the employee believes they are looking at
+(`testRunId`, `configRevision`, `configHash`). The server derives the real evidence from its own records and rejects any difference:
+
+* usable evidence = the **newest run whose revision, hash and suite version equal the session's current ones**;
+* none (never run, or the config changed since) -> `422 EVIDENCE_NOT_CURRENT`; PENDING -> `409`; ERROR -> `422 EVIDENCE_NOT_COMPLETED` (an ERROR run on the current config is not skipped in favour of an older pass);
+* a **FAILED** run is accepted and labelled FAILED everywhere (employee page, manager page, stored record). It is honest evidence, not a resolution.
+
+Stored once, never updated, at `PK=ASSIGN#<assignmentId>, SK=SUBMISSION#<NN>` (create-if-absent): server-generated `submissionId` and attempt, org, assignment,
+session, employee, scenario id/version, `rubricVersion`, `manifestVersion`, the report, the exact config revision/hash/snapshot, the frozen terminal run (cases,
+suite version, executor region and request ids), what was opened, the last evidence event sequence, `submittedAt` and `evaluation`.
+
+### One transaction, five effects
+
+Session `INVESTIGATING -> SUBMITTED` (conditional on `stateVersion` and owner) + immutable submission (create-only) + idempotency ledger entry
+(create-only, `PK=SESSION#id, SK=IDEM#SUBMIT#<key>`, holds a hash of the request content) + assignment `IN_PROGRESS -> AWAITING_REVIEW`
+(conditional on this very session) + the `SUBMISSION_CREATED` event at the new state version. Any failed condition cancels all of it.
+
+* Same key + same content -> the original submission (`200`, `created:false`), nothing written. Same key + different content -> `409 IDEMPOTENCY_CONFLICT`.
+* Two simultaneous submissions: exactly one commits; the loser is `409` (different keys) or a replay (same key).
+* Once submitted the attempt is locked by the engine: save-config, run-tests, open-item and re-submit are all rejected. Earlier revisions and runs stay readable.
+
+### Lifecycle and the no-AI state
+
+`ASSIGNED -> IN_PROGRESS -> AWAITING_REVIEW -> APPROVED | REVISION_REQUESTED -> (employee begins) IN_PROGRESS` (attempt N+1).
+`SUBMITTED` and `EVALUATING` stay in the contract but are **not produced**. Without AI a submission goes straight to `AWAITING_REVIEW` with
+`evaluation = NOT_CONFIGURED`, because a separate `SUBMITTED -> AWAITING_REVIEW` write would not be atomic and could strand a submission where no
+manager could see it. When Bedrock arrives, the submit transaction targets `EVALUATING` instead and a worker moves it to `AWAITING_REVIEW`.
+
+### Decisions (immutable, one per submission)
+
+A decision is an append-only item at `ASSIGN#<id> / DECISION#<NN>` (create-only; one slot per attempt, so a second decision cannot exist) written in the same transaction as the session's
+`REVIEW_DECIDED` event (the engine action `RECORD_REVIEW`, which refuses the employee and the system identity), and the assignment move to `APPROVED` / `REVISION_REQUESTED`
+(conditional on `AWAITING_REVIEW` and on this being `latestSubmissionId`). Repeating the identical decision by the same reviewer is an idempotent `200`; anything else is `409 ALREADY_DECIDED`.
+
+### Revision attempts
+
+`REQUEST_REVISION` leaves attempt N exactly as it is. The employee's **Begin attempt N+1** calls the existing start route, which creates a **new session**
+(`sessionIdFor(assignmentId, N+1)`), a first event, and moves the assignment to `IN_PROGRESS` pointing at it, atomically and conditional on the previous session id (a double click yields one attempt).
+Attempt N+1 starts from the scenario baseline (revision 0), not from attempt N's configuration; attempt N's submission and the manager's feedback stay visible on the page.
+Maximum 5 attempts: a revision cannot be requested on the 5th, and a 6th cannot begin. Attempt 1 uses the existing deterministic ids, so live Phase 2B/2C records are unchanged;
+`attemptNumber`, `latestSubmissionId`, `submissionId` and `reviewDecision` are optional on read and default to attempt 1 / none.
+
+### Manager queue and timeline (no scan, no new index)
+
+The review queue is the manager's **existing** `GSI2` `ASSIGN#` listing filtered to `AWAITING_REVIEW`; the assignment gained `latestSubmissionId`. The `GSI2SK` prefix is unchanged.
+The timeline is a bounded single-partition `Query` of the Events table for that session (<= 250 events), cut off at the submission event.
+
+### What the update changes in `onboardos-dev`
+
+Derived by running SAM's translator locally on the `HEAD` template (Phase 2C as merged) and on the new one and diffing the CloudFormation. **This is not a change set**; replacement behaviour is unverified.
+
+| Resource | Change |
+|---|---|
+| `OnboardOSApiFunctionApi{SubmitReport,GetReview,DecideReview}Permission` | **Added** (API Gateway invoke permission for the 3 routes) |
+| `OnboardOSApiFunction` | Modified: `Description`, new code only (no environment change) |
+| `OnboardOSApiRole` | Modified: `Description`, `Policies` (+ `EventsRead`) |
+| `OnboardOSHttpApi` | Modified: OpenAPI `Body` only (+3 JWT-protected routes; CORS `AllowHeaders` + `Idempotency-Key`) |
+| Cognito (4), both tables, runner function/role/log group, smoke function/role, other log groups, Outputs | **Unchanged** |
+| Removed resources | None |
+
+### IAM delta (the only one)
+
+| Identity | Added | Still not allowed |
+|---|---|---|
+| `OnboardOSApiRole` | `dynamodb:Query` on the **Events table ARN only** (sid `EventsRead`), to read one session's events for the evidence timeline | any Events `Scan`/`GetItem`/`UpdateItem`/`DeleteItem`; any index (the table has none); `Scan` anywhere |
+| `OnboardOSRunnerRole`, Cognito, tables | nothing | |
+
+Submissions, decisions and the ledger are `PutItem`/`UpdateItem`/`GetItem`/`Query` on the Core table, already granted.
+
+### Deploy procedure
+
+Same reviewed-change-set gate, same parameters. Expected change set: `Add` the three `OnboardOSApiFunctionApi*Permission`; `Modify`, `Replacement: False`: `OnboardOSApiFunction`, `OnboardOSApiRole`, `OnboardOSHttpApi`.
+**STOP** if Cognito, either table, the runner, or the smoke function appears, or any `Remove` / `Replacement: True|Conditional`.
+Roles are unnamed, so the existing `CAPABILITY_IAM` is sufficient.
+
+### Live verification (NOT RUN: execute after deployment; every row must pass before calling this verified on AWS)
+
+Use real sign-ins (employee and manager in separate browser profiles). Keep tokens out of shared places.
+
+| # | As | Action | Expected |
+|---|---|---|---|
+| 1 | employee | open the assigned session, **no test run yet**: look at *Incident report* | submit is disabled; reason "Run the tests ..." |
+| 2 | employee | Save `1400`, Run tests, then write all four report fields and **Submit for review** | submitted; page shows *Awaiting review*, evidence "Failed 4 of 5", "executed on AWS Lambda", the runner request id |
+| 3 | employee | refresh | still *Submitted*; config/test/report controls are not editable |
+| 4 | employee | (DevTools) repeat the submit request with the **same** `Idempotency-Key` | `200`, same `submissionId`, no second record |
+| 5 | manager | Refresh the *Review queue* (GSI is eventually consistent: allow a few seconds) | the submission appears; click **Review** |
+| 6 | manager | read the page | report, frozen config hash, **Failed 4/5** with the case table, Lambda region and two request ids, timeline of 5+ events ending at *Submitted the incident report* |
+| 7 | CloudWatch | open `/aws/lambda/<RunnerFunctionName>` | a `scenario_run` line whose `requestId` equals the page's *runner request* id |
+| 8 | manager | **Request revision** with fewer than 10 characters | refused client-side and `400` server-side |
+| 9 | manager | Request revision with real feedback | status *Revision requested*; decision shown read-only; refresh persists it |
+| 10 | manager | try to decide again (UI is gone; use curl) | `409 ALREADY_DECIDED` |
+| 11 | employee | open the assignment list, **Read the feedback**, then **Begin attempt 2** | new session, attempt 2, baseline config, attempt 1 + feedback listed under *Earlier attempts* |
+| 12 | employee | Save `1800`, Run tests (expect Passed 5/5), submit | *Awaiting review*; assignment shows attempt 2 |
+| 13 | manager | review attempt 2: *All attempts* lists both; **Approve** | *Approved*; employee refresh shows *Approved* and both attempts |
+| 14 | curl, employee token | `GET /v1/reviews/<submissionId>` and `POST .../decision` | `404` |
+| 15 | curl, a manager who did not assign it / another tenant | same | `404` |
+| 16 | curl, no token | any new route | `401` from API Gateway |
+| 17 | browser | submit the report from the real origin | the CORS preflight accepts `Idempotency-Key` (no console CORS error) |
+
+Read-only data check (after step 2): `aws dynamodb query --table-name <CoreTableName> --key-condition-expression "PK = :p AND begins_with(SK, :s)" --expression-attribute-values '{":p":{"S":"ASSIGN#<assignmentId>"},":s":{"S":"SUBMISSION#"}}'`.
+
+### Known limitations (Phase 2D)
+
+| # | Limitation | Impact |
+|---|---|---|
+| 1 | **Nothing here is verified on AWS** | real DynamoDB conditions, IAM (`EventsRead`), Cognito identities, the CORS preflight and the deployed UI are unverified |
+| 2 | **No Bedrock / no AI evaluation** | `evaluation = NOT_CONFIGURED`; `SUBMITTED`/`EVALUATING` are reserved and never written |
+| 3 | The queue reads `GSI2` (eventually consistent) | a just-submitted item can take a few seconds to appear; Refresh converges |
+| 4 | Attempt N+1 starts from the scenario baseline, not attempt N's config | deliberate (fresh, auditable attempt); feedback and the old attempt stay visible |
+| 5 | Org admins can review through the API but have no UI | the admin screen is still the identity screen |
+| 6 | Idempotency keys exist for **submission** only | decisions and attempt-begin are naturally idempotent (create-only slots, previous-session condition) but have no key ledger |
+| 7 | The timeline shows up to 250 events and skips malformed ones | a session holds at most about 222 events (200 actions + 20 run completions + 1 submission + 1 decision), below the limit |
+| 8 | No component tests for the React pages | request shapes, validation and presentation rules are unit-tested; **manual browser verification matters** (rows 1-13 above) |
+| 9 | Reviewer must be the assigner or an org admin | a second manager on the team cannot review; there is no delegation |
+| 10 | A stored submission that fails validation is hidden and the review route returns `500`/`404` | fail closed, never rendered |
+
+### Rollback
+
+Redeploy the Phase 2C template through the same gate: removes the three routes/permissions and `EventsRead`. Submissions, decisions, ledger entries and the extra state fields stay in the Core table, ignored by Phase 2C code
+(which cannot write `SUBMITTED` sessions or read these items). An assignment left in `AWAITING_REVIEW`/`APPROVED`/`REVISION_REQUESTED` would be shown by the older UI as its raw status and could not be started. `sam delete` is not a rollback: it deletes the tables.

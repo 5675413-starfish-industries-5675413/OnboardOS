@@ -44,3 +44,27 @@ export function sessionIdFor(assignmentId: string, attempt = 1): string {
 export function testRunIdFor(sessionId: string, runNumber: number): string {
   return `run_${String(runNumber).padStart(4, "0")}_${digest(`${sessionId}|testrun|${runNumber}`).slice(0, 12)}`;
 }
+
+export const SUBMISSION_ID_PATTERN = /^sub_\d{2}_[0-9a-f]{32}$/;
+
+/**
+ * A submission id ENCODES its assignment and attempt: `sub_<attempt>_<assignment hex>`.
+ * That makes `GET /v1/reviews/{submissionId}` a consistent key lookup
+ * (`ASSIGN#<id> / SUBMISSION#<attempt>`) with no scan and no extra index, and makes
+ * the id deterministic per attempt, so a retry can only ever target the same record.
+ * Like every id here it is NOT a security control: each read re-checks authorization.
+ */
+export function submissionIdFor(assignmentId: string, attempt: number): string {
+  const hex = assignmentId.replace(/^asg_/, "");
+  return `sub_${String(attempt).padStart(2, "0")}_${hex}`;
+}
+
+/** Inverse of {@link submissionIdFor}, or null if the id is not well formed. */
+export function parseSubmissionId(id: string): { assignmentId: string; attempt: number } | null {
+  if (!SUBMISSION_ID_PATTERN.test(id)) return null;
+  const attempt = Number(id.slice(4, 6));
+  if (attempt < 1) return null;
+  return { assignmentId: `asg_${id.slice(7)}`, attempt };
+}
+
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
