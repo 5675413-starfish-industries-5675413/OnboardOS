@@ -138,9 +138,9 @@ describe("API routes and authorization", () => {
     expect(http).toMatch(/audience:\s*\n\s*-\s*!Ref OnboardOSSpaClient/);
   });
 
-  it("allows only the local dev origin (no wildcard) and the Authorization header", () => {
+  it("allows only the approved localhost and production origins (no wildcard) and the Authorization header", () => {
     const http = resource("OnboardOSHttpApi");
-    expect(listUnder(http, "AllowOrigins")).toEqual(["http://localhost:5173"]);
+    expect(listUnder(http, "AllowOrigins")).toEqual(["http://localhost:5173", "https://onboard-os-nine.vercel.app"]);
     expect(listUnder(http, "AllowHeaders")).toContain("Authorization");
     // The browser sends Idempotency-Key on report submission; without this the preflight would fail.
     expect([...listUnder(http, "AllowHeaders")].sort()).toEqual(["Authorization", "Content-Type", "Idempotency-Key"]);
@@ -350,9 +350,9 @@ describe("Cognito", () => {
     expect(flows).not.toMatch(/USER_PASSWORD_AUTH|SRP|ADMIN|CUSTOM/);
   });
 
-  it("registers exact localhost callback/logout URLs (no wildcards)", () => {
-    expect(listUnder(client, "CallbackURLs")).toEqual(["http://localhost:5173/callback"]);
-    expect(listUnder(client, "LogoutURLs")).toEqual(["http://localhost:5173"]);
+  it("registers exact localhost and production callback/logout URLs (no wildcards)", () => {
+    expect(listUnder(client, "CallbackURLs")).toEqual(["http://localhost:5173/callback", "https://onboard-os-nine.vercel.app/callback"]);
+    expect(listUnder(client, "LogoutURLs")).toEqual(["http://localhost:5173", "https://onboard-os-nine.vercel.app"]);
   });
 
   it("hides whether a username exists", () => {
@@ -413,8 +413,8 @@ describe("Cognito sign-in page (managed login) -- a usable login page needs ALL 
 
   it("keeps the redirect URIs the frontend's PKCE flow sends", () => {
     const client = resource("OnboardOSSpaClient");
-    expect(listUnder(client, "CallbackURLs")).toEqual(["http://localhost:5173/callback"]);
-    expect(listUnder(client, "LogoutURLs")).toEqual(["http://localhost:5173"]);
+    expect(listUnder(client, "CallbackURLs")).toEqual(["http://localhost:5173/callback", "https://onboard-os-nine.vercel.app/callback"]);
+    expect(listUnder(client, "LogoutURLs")).toEqual(["http://localhost:5173", "https://onboard-os-nine.vercel.app"]);
     expect(listUnder(client, "AllowedOAuthScopes").sort()).toEqual(["email", "openid", "profile"]);
   });
 });
