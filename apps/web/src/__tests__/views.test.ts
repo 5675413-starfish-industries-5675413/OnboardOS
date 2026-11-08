@@ -19,6 +19,7 @@ import {
   reviewQueue,
   runBadge,
   displayOrganizationName,
+  displayPersonName,
   shortHash,
   submissionReadiness,
   validateCoworkerMessage,
@@ -138,6 +139,15 @@ describe("run presentation", () => {
   it("shows the seeded demo workplace as AWS and leaves other names unchanged", () => {
     expect(displayOrganizationName("Northstar Cloud")).toBe("AWS");
     expect(displayOrganizationName("Contoso")).toBe("Contoso");
+  });
+
+  it("shows the demo employee as John Doe and the manager by role instead of an account id", () => {
+    expect(displayPersonName("employee")).toBe("John Doe");
+    expect(displayPersonName("employee@northstar-demo.example")).toBe("John Doe");
+    expect(displayPersonName("manager")).toBe("Manager");
+    expect(displayPersonName("24980458-1001-70d5-66e8-97deff3258bb", "manager")).toBe("Manager");
+    expect(displayPersonName("24980458-1001-70d5-66e8-97deff3258bb", "employee")).toBe("John Doe");
+    expect(displayPersonName("Priya Raman")).toBe("Priya Raman");
   });
 
   it("shortHash drops the algorithm prefix", () => {

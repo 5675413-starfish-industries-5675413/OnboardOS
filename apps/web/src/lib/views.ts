@@ -135,6 +135,26 @@ export function displayOrganizationName(name: string): string {
   return name === "Northstar Cloud" ? "AWS" : name;
 }
 
+const ACCOUNT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Names safe to show on screen. The demo accounts are stored as "employee",
+ * "manager", and "admin", and Cognito often sends only an account id.
+ * John Doe is the demo employee. Other names are shown as stored.
+ */
+export function displayPersonName(name: string, role?: "org_admin" | "manager" | "employee"): string {
+  if (ACCOUNT_ID.test(name)) {
+    if (role === "org_admin") return "Admin";
+    if (role === "manager") return "Manager";
+    if (role === "employee") return "John Doe";
+    return "Signed-in user";
+  }
+  if (name === "employee" || name === "employee@northstar-demo.example") return "John Doe";
+  if (name === "manager" || name === "manager@northstar-demo.example") return "Manager";
+  if (name === "admin" || name === "admin@northstar-demo.example") return "Admin";
+  return name;
+}
+
 /** First 12 hex characters of a `sha256:` hash, for display. */
 export function shortHash(hash: string): string {
   return hash.replace(/^sha256:/, "").slice(0, 12);

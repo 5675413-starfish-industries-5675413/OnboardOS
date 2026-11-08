@@ -115,7 +115,7 @@ export function buildDemoUsers(
     },
     {
       email: (overrides.employee ?? "employee@northstar-demo.example").trim().toLowerCase(),
-      preferredUsername: "employee",
+      preferredUsername: "John Doe",
       role: "employee",
       teamIds: ["cloud-team-1"],
     },

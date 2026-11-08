@@ -8,6 +8,7 @@ import { assignmentCoachingLabel, newAssignmentCoachingLine } from "../lib/coach
 import { ScenariosCard } from "./ScenariosCard.js";
 import {
   assignmentStatusLabel,
+  displayPersonName,
   assignmentStatusTone,
   describeApiError,
   hasAssignment,
@@ -80,6 +81,17 @@ export function ManagerView({ orgId }: { orgId: string }) {
 
   const alreadyAssigned = selected !== "" && hasAssignment(assignments, selected);
   const queue = reviewQueue(assignments);
+  const attemptBySub = new Map(assignments.flatMap((a) => (a.employee ? [[a.employee.userSub, a.attemptNumber] as const] : [])));
+  const sharedNames = new Map<string, number>();
+  for (const person of employees) {
+    const shown = displayPersonName(person.displayName);
+    sharedNames.set(shown, (sharedNames.get(shown) ?? 0) + 1);
+  }
+  const personLabel = (userSub: string, storedName: string) => {
+    const shown = displayPersonName(storedName);
+    const attempt = attemptBySub.get(userSub);
+    return (sharedNames.get(shown) ?? 0) > 1 && attempt ? `${shown} (attempt ${attempt})` : shown;
+  };
 
   return (
     <>
@@ -104,7 +116,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
                 </option>
                 {employees.map((e) => (
                   <option key={e.userSub} value={e.userSub}>
-                    {e.displayName}
+                    {personLabel(e.userSub, e.displayName)}
                   </option>
                 ))}
               </select>
@@ -136,7 +148,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
             <tbody>
               {queue.waiting.map((a) => (
                 <tr key={a.assignmentId}>
-                  <td>{a.employee?.displayName ?? "—"}</td>
+                  <td>{a.employee ? personLabel(a.employee.userSub, a.employee.displayName) : "—"}</td>
                   <td>{a.scenarioTitle}</td>
                   <td>{a.attemptNumber}</td>
                   <td>
@@ -156,7 +168,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
               <span key={a.assignmentId}>
                 {i > 0 && " · "}
                 <Link to={`/reviews/${encodeURIComponent(a.latestSubmissionId ?? "")}`}>
-                  {a.employee?.displayName ?? "Employee"} (attempt {a.attemptNumber}, {assignmentStatusLabel(a.status).toLowerCase()})
+                  {a.employee ? personLabel(a.employee.userSub, a.employee.displayName) : "Employee"} ({assignmentStatusLabel(a.status).toLowerCase()})
                 </Link>
               </span>
             ))}
@@ -186,7 +198,7 @@ export function ManagerView({ orgId }: { orgId: string }) {
             <tbody>
               {assignments.map((a) => (
                 <tr key={a.assignmentId}>
-                  <td>{a.employee?.displayName ?? "—"}</td>
+                  <td>{a.employee ? personLabel(a.employee.userSub, a.employee.displayName) : "—"}</td>
                   <td>{a.scenarioTitle}</td>
                   <td>
                     <span className={toneClass(assignmentStatusTone(a.status))}>

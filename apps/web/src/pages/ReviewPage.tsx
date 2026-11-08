@@ -8,6 +8,7 @@ import {
   assignmentStatusLabel,
   assignmentStatusTone,
   describeApiError,
+  displayPersonName,
   toneClass,
   validateDecision,
 } from "../lib/views.js";
@@ -112,7 +113,7 @@ export function ReviewPage() {
           <Link to="/app" className="btn btn-sm">Back</Link>
         </div>
         <p>
-          <strong>{employee.displayName}</strong> · attempt {sub.attemptNumber} · submitted{" "}
+          <strong>{displayPersonName(employee.displayName)}</strong> · attempt {sub.attemptNumber} · submitted{" "}
           {new Date(sub.submittedAt).toLocaleString()}
         </p>
         <p className="muted">

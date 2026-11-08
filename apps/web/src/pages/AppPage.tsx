@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { MeResponse, OrgRole } from "@onboardos/contracts";
 import { ApiError, getMe } from "../lib/api.js";
 import { getSession, logout } from "../lib/auth.js";
-import { displayOrganizationName, viewForRole } from "../lib/views.js";
+import { displayOrganizationName, displayPersonName, viewForRole } from "../lib/views.js";
 import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import { EmployeeView } from "../views/EmployeeView.js";
 import { ManagerView } from "../views/ManagerView.js";
@@ -100,9 +100,10 @@ export function AppPage() {
   const primary = me.memberships[0];
   const view = primary ? viewForRole(primary.role) : "identity";
   const workplace = primary ? displayOrganizationName(primary.organizationName) : undefined;
+  const signedInAs = displayPersonName(me.username, primary?.role);
 
   return (
-    <WorkspaceShell area="Overview" organization={workplace} username={me.username}>
+    <WorkspaceShell area="Overview" organization={workplace} username={signedInAs}>
     <div className={view === "identity" ? "container" : "container-wide"}>
       <div className="card">
         <div className="row">
@@ -111,7 +112,7 @@ export function AppPage() {
         </div>
 
         <div className="info">
-          Signed in as <strong>{me.username}</strong>
+          Signed in as <strong>{signedInAs}</strong>
         </div>
 
         {me.memberships.length === 0 ? (

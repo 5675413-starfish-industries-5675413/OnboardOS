@@ -352,6 +352,13 @@ describe("provisioning behaviour", () => {
     );
     expect(attrs["email_verified"]).toBe("true");
     expect(attrs["preferred_username"]).toBe("admin");
+    const employee = cognito.sent.find(
+      (c) => c instanceof AdminCreateUserCommand && c.input["Username"] === "employee@northstar-demo.example",
+    );
+    const employeeAttrs = Object.fromEntries(
+      (employee?.input["UserAttributes"] as Array<{ Name: string; Value: string }>).map((a) => [a.Name, a.Value]),
+    );
+    expect(employeeAttrs["preferred_username"]).toBe("John Doe");
     expect(create?.input["UserPoolId"]).toBe("pool-1");
   });
 });
