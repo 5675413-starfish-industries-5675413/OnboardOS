@@ -12,6 +12,9 @@
     },
     {
       "path": "./services/api"
+    },
+    {
+      "path": "./services/test-runner"
     }
   ]
 }

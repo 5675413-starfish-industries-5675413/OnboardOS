@@ -7,6 +7,7 @@
 
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { docClient } from "./db.js";
+import { lambdaRunnerFromEnv, type RunnerClient } from "./runner.js";
 
 export interface Db {
   client: Pick<DynamoDBDocumentClient, "send">;
@@ -18,6 +19,12 @@ export interface ApiDeps {
   db: Db;
   /** Server clock, ISO-8601. Injected so the engine and tests stay deterministic. */
   now: () => string;
+  /**
+   * The scenario-runner client. LAZY: it throws when the runner is not configured,
+   * so callers obtain it BEFORE persisting a PENDING run (a misconfigured runner
+   * then fails fast and leaves nothing stranded).
+   */
+  runner: () => RunnerClient;
 }
 
 /** Production dependencies. Throws (=> 500, fail closed) if the tables are not configured. */
@@ -30,5 +37,6 @@ export function defaultDeps(): ApiDeps {
   return {
     db: { client: docClient, coreTable, eventsTable },
     now: () => new Date().toISOString(),
+    runner: lambdaRunnerFromEnv,
   };
 }

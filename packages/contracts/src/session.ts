@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { IncidentConfigSchema, ScenarioPublicSchema } from "./scenario.js";
+import { ConfigRevisionViewSchema, CurrentEvidenceSchema, TestRunViewSchema } from "./testRun.js";
 
 export const SessionPhaseSchema = z.enum(["NOT_STARTED", "INVESTIGATING"]);
 export type SessionPhase = z.infer<typeof SessionPhaseSchema>;
@@ -28,6 +29,16 @@ export const SessionViewSchema = z.object({
   phase: SessionPhaseSchema,
   stateVersion: z.number().int().nonnegative(),
   config: IncidentConfigSchema,
+  /** Latest saved revision number; 0 = the scenario baseline. */
+  configRevision: z.number().int().nonnegative(),
+  configHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  /** Saved revisions, newest first (bounded). */
+  revisions: z.array(ConfigRevisionViewSchema),
+  /** Test runs, newest first (bounded). */
+  testRuns: z.array(TestRunViewSchema),
+  /** Result of the latest run for the CURRENT config, or NONE. */
+  currentEvidence: CurrentEvidenceSchema,
+  activeTestRunId: z.string().nullable(),
   viewed: ViewedSchema,
   startedAt: z.string().nullable(),
   updatedAt: z.string(),
@@ -65,3 +76,10 @@ export type SessionActionResponse = z.infer<typeof SessionActionResponseSchema>;
 
 export const GetSessionResponseSchema = z.object({ session: SessionViewSchema });
 export type GetSessionResponse = z.infer<typeof GetSessionResponseSchema>;
+
+export const SaveConfigResponseSchema = z.object({ session: SessionViewSchema });
+export type SaveConfigResponse = z.infer<typeof SaveConfigResponseSchema>;
+
+/** Returned when a run is requested and when it is polled. */
+export const TestRunResponseSchema = z.object({ testRun: TestRunViewSchema, session: SessionViewSchema });
+export type TestRunResponse = z.infer<typeof TestRunResponseSchema>;

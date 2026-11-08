@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { AssignmentView, SessionView } from "@onboardos/contracts";
 import { ApiError } from "../lib/api.js";
-import { actionForTab, describeApiError, hasAssignment, mergeAssignment, viewForRole } from "../lib/views.js";
+import {
+  actionForTab,
+  canRunTests,
+  describeApiError,
+  hasAssignment,
+  mergeAssignment,
+  parseTimeoutInput,
+  runBadge,
+  shortHash,
+  viewForRole,
+} from "../lib/views.js";
 
 const session = (viewed: Partial<SessionView["viewed"]> = {}): SessionView =>
   ({
@@ -90,5 +100,41 @@ describe("describeApiError", () => {
   it("handles non-ApiError values", () => {
     expect(describeApiError(new Error("boom"))).toMatch(/something went wrong/i);
     expect(describeApiError("x")).toMatch(/something went wrong/i);
+  });
+});
+
+describe("parseTimeoutInput (UX hint only; the server re-validates)", () => {
+  it("accepts whole numbers on and inside the policy bounds", () => {
+    expect(parseTimeoutInput("100")).toEqual({ ok: true, value: 100 });
+    expect(parseTimeoutInput(" 1800 ")).toEqual({ ok: true, value: 1800 });
+    expect(parseTimeoutInput("2000")).toEqual({ ok: true, value: 2000 });
+  });
+  it.each(["99", "2001", "0", "-5", "", "abc", "12.5", "1e3", "1800ms", "NaN", "99999999999999999999"])("rejects %j", (raw) => {
+    expect(parseTimeoutInput(raw).ok).toBe(false);
+  });
+});
+
+describe("run presentation", () => {
+  it("never labels an error or failure as a pass", () => {
+    expect(runBadge({ status: "PASSED", stale: false })).toEqual({ label: "Passed", tone: "ok" });
+    expect(runBadge({ status: "FAILED", stale: false }).tone).toBe("bad");
+    expect(runBadge({ status: "ERROR", stale: false }).tone).toBe("bad");
+    expect(runBadge({ status: "PENDING", stale: false }).label).toBe("Running");
+  });
+  it("shortHash drops the algorithm prefix", () => {
+    expect(shortHash("sha256:" + "ab".repeat(32))).toBe("abababababab");
+  });
+  it("canRunTests is false while busy, not investigating, or a run is active", () => {
+    const s = { phase: "INVESTIGATING", activeTestRunId: null } as const;
+    expect(canRunTests(s, false)).toBe(true);
+    expect(canRunTests(s, true)).toBe(false);
+    expect(canRunTests({ ...s, activeTestRunId: "run_0001_aaaaaaaaaaaa" }, false)).toBe(false);
+    expect(canRunTests({ phase: "NOT_STARTED", activeTestRunId: null }, false)).toBe(false);
+  });
+  it("explains the new conflict and limit codes", () => {
+    expect(describeApiError(new ApiError(409, "RUN_IN_PROGRESS", "x"))).toMatch(/already in progress/);
+    expect(describeApiError(new ApiError(429, "RUN_LIMIT_REACHED", "x"))).toMatch(/test runs/);
+    expect(describeApiError(new ApiError(429, "REVISION_LIMIT_REACHED", "x"))).toMatch(/revisions/);
+    expect(describeApiError(new ApiError(422, "CONFIG_OUT_OF_POLICY", "Between 100 and 2000"))).toBe("Between 100 and 2000");
   });
 });

@@ -29,29 +29,58 @@ export interface WorkplaceState {
   /** Optimistic-concurrency token; equals the number of successful actions so far. */
   readonly stateVersion: number;
   readonly config: Readonly<IncidentConfig>;
+  /** Number of saved immutable revisions. 0 = the scenario baseline (never stored as an item). */
+  readonly configRevision: number;
+  /** `sha256:<hex>` of the canonical current config; always recomputable from `config`. */
+  readonly configHash: string;
+  /** Test runs requested so far (monotonic; bounds run history and numbers run ids). */
+  readonly testRunsRequested: number;
+  /** The one run awaiting a result, or null. At most one run is in flight. */
+  readonly activeTestRunId: string | null;
   readonly viewed: Readonly<Viewed>;
   readonly startedAt: string | null;
   readonly updatedAt: string;
 }
 
 /**
+ * Identity of the trusted backend component that records runner outcomes.
+ * Browser-originated actions can never carry it; client actions can never be
+ * performed by it.
+ */
+export const SYSTEM_ACTOR = "system:scenario-runner";
+
+export type TestOutcome = "PASSED" | "FAILED" | "ERROR";
+
+/**
  * Semantic actions the engine understands. Every action carries the version it
  * was based on, so a stale or concurrent request is rejected, never merged.
  *
- * Config edits and report submission arrive in later slices; they are
- * intentionally not representable here yet.
+ * SAVE_CONFIG carries an UNTRUSTED `config`; the engine validates it.
+ * RECORD_TEST_RESULT is a SYSTEM action: only SYSTEM_ACTOR may perform it.
  */
 export type WorkplaceAction =
   | { readonly type: "START_INVESTIGATION"; readonly expectedVersion: number }
   | { readonly type: "OPEN_TICKET"; readonly ticketId: string; readonly expectedVersion: number }
   | { readonly type: "OPEN_RUNBOOK"; readonly runbookId: string; readonly expectedVersion: number }
-  | { readonly type: "OPEN_DIAGNOSTICS"; readonly diagnosticsId: string; readonly expectedVersion: number };
+  | { readonly type: "OPEN_DIAGNOSTICS"; readonly diagnosticsId: string; readonly expectedVersion: number }
+  | { readonly type: "SAVE_CONFIG"; readonly config: unknown; readonly expectedVersion: number }
+  | { readonly type: "REQUEST_TEST_RUN"; readonly testRunId: string; readonly expectedVersion: number }
+  | {
+      readonly type: "RECORD_TEST_RESULT";
+      readonly testRunId: string;
+      readonly outcome: TestOutcome;
+      readonly errorCode?: string;
+      readonly expectedVersion: number;
+    };
 
 export type EventType =
   | "INVESTIGATION_STARTED"
   | "TICKET_OPENED"
   | "RUNBOOK_OPENED"
-  | "DIAGNOSTICS_OPENED";
+  | "DIAGNOSTICS_OPENED"
+  | "CONFIG_SAVED"
+  | "TEST_RUN_REQUESTED"
+  | "TEST_RUN_COMPLETED";
 
 /**
  * A server-originated record of one successful action. `sequence` always equals
@@ -81,7 +110,14 @@ export type RejectionCode =
   | "UNKNOWN_OBJECT"
   | "LIMIT_REACHED"
   | "NOT_OWNER"
-  | "SCENARIO_MISMATCH";
+  | "NOT_AUTHORIZED"
+  | "SCENARIO_MISMATCH"
+  | "INVALID_CONFIG"
+  | "CONFIG_OUT_OF_POLICY"
+  | "CONFIG_UNCHANGED"
+  | "RUN_IN_PROGRESS"
+  | "RUN_LIMIT_REACHED"
+  | "REVISION_LIMIT_REACHED";
 
 export interface Rejection {
   readonly code: RejectionCode;

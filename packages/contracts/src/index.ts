@@ -16,4 +16,5 @@ export * from "./membership.js";
 export * from "./me.js";
 export * from "./scenario.js";
 export * from "./assignment.js";
+export * from "./testRun.js";
 export * from "./session.js";

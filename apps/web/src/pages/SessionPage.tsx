@@ -1,8 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import type { SessionView } from "@onboardos/contracts";
-import { ApiError, fetchSession, postSessionAction } from "../lib/api.js";
-import { actionForTab, describeApiError, type Tab } from "../lib/views.js";
+import type { SessionView, TestRunView } from "@onboardos/contracts";
+import {
+  ApiError,
+  fetchSession,
+  fetchTestRun,
+  postSessionAction,
+  requestTestRun,
+  saveConfig,
+} from "../lib/api.js";
+import {
+  actionForTab,
+  canRunTests,
+  describeApiError,
+  parseTimeoutInput,
+  runBadge,
+  shortHash,
+  type Tab,
+} from "../lib/views.js";
+
+/** How often a PENDING run is re-read from the server. */
+const POLL_MS = 2000;
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "ticket", label: "Ticket" },
@@ -27,6 +45,8 @@ export function SessionPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [running, setRunning] = useState(false);
 
   const handleAuth = useCallback(
     (err: unknown): boolean => {
@@ -57,6 +77,86 @@ export function SessionPage() {
       active = false;
     };
   }, [sessionId, handleAuth]);
+
+  // The editor always starts from the SERVER's current config; it resets when a new revision lands.
+  const serverTimeout = session?.config.request_timeout_ms;
+  const serverRevision = session?.configRevision;
+  useEffect(() => {
+    if (serverTimeout !== undefined) setDraft(String(serverTimeout));
+  }, [serverTimeout, serverRevision]);
+
+  // While a run is PENDING, ask the server for it. The server also closes a run that never finished.
+  const activeRunId = session?.activeTestRunId ?? null;
+  useEffect(() => {
+    if (!activeRunId || running) return;
+    let active = true;
+    const timer = setInterval(() => {
+      fetchTestRun(sessionId, activeRunId)
+        .then((r) => {
+          if (active) setSession(r.session);
+        })
+        .catch((err: unknown) => {
+          if (active && !handleAuth(err)) setError(describeApiError(err));
+        });
+    }, POLL_MS);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [activeRunId, running, sessionId, handleAuth]);
+
+  async function reloadAfterConflict(err: unknown, id: string) {
+    if (err instanceof ApiError && err.status === 409) {
+      // Our view was stale: replace it with the server's truth rather than guessing.
+      try {
+        setSession(await fetchSession(id));
+      } catch (reloadErr) {
+        if (!handleAuth(reloadErr)) setError(describeApiError(reloadErr));
+      }
+    }
+  }
+
+  async function onSaveConfig() {
+    if (!session || busy || running) return;
+    const parsed = parseTimeoutInput(draft);
+    if (!parsed.ok) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const next = await saveConfig(session.sessionId, session.stateVersion, { request_timeout_ms: parsed.value });
+      setSession(next);
+      setNotice(`Saved as revision ${next.configRevision}. Run the tests to check it.`);
+    } catch (err) {
+      if (handleAuth(err)) return;
+      setError(describeApiError(err));
+      await reloadAfterConflict(err, session.sessionId);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onRunTests() {
+    if (!session || !canRunTests(session, busy || running)) return;
+    setRunning(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await requestTestRun(session.sessionId, session.stateVersion);
+      setSession(r.session);
+    } catch (err) {
+      if (handleAuth(err)) return;
+      setError(describeApiError(err));
+      // The run may still be recorded server-side; always show what the server holds.
+      try {
+        setSession(await fetchSession(session.sessionId));
+      } catch (reloadErr) {
+        if (!handleAuth(reloadErr)) setError(describeApiError(reloadErr));
+      }
+    } finally {
+      setRunning(false);
+    }
+  }
 
   async function selectTab(next: Tab) {
     if (!session || busy) return;
@@ -156,13 +256,20 @@ export function SessionPage() {
         </div>
       </div>
 
-      <div className="card">
-        <h2>Current configuration</h2>
-        <p className="mono" data-testid="config">
-          {JSON.stringify(session.config)}
-        </p>
-        <p className="muted">Read-only for now.</p>
-      </div>
+      <ConfigCard
+        session={session}
+        draft={draft}
+        onDraft={setDraft}
+        onSave={() => void onSaveConfig()}
+        disabled={busy || running}
+      />
+
+      <TestRunsCard
+        session={session}
+        running={running}
+        canRun={canRunTests(session, busy || running)}
+        onRun={() => void onRunTests()}
+      />
     </div>
   );
 }
@@ -238,6 +345,173 @@ function DiagnosticsPanel({ session }: { session: SessionView }) {
           ))}
         </tbody>
       </table>
+    </section>
+  );
+}
+
+function ConfigCard(props: {
+  session: SessionView;
+  draft: string;
+  onDraft: (v: string) => void;
+  onSave: () => void;
+  disabled: boolean;
+}) {
+  const { session, draft } = props;
+  const parsed = parseTimeoutInput(draft);
+  const unchanged = parsed.ok && parsed.value === session.config.request_timeout_ms;
+  const errorId = "timeout-error";
+  return (
+    <div className="card">
+      <h2>Configuration</h2>
+      <p className="muted" data-testid="config-summary">
+        {session.configRevision === 0 ? "Baseline (no revision saved yet)" : `Revision ${session.configRevision}`} ·{" "}
+        <span className="mono">{shortHash(session.configHash)}</span>
+      </p>
+      <p className="mono" data-testid="config">
+        {JSON.stringify(session.config)}
+      </p>
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onSave();
+        }}
+      >
+        <div className="toolbar">
+          <div>
+            <label htmlFor="timeout-input">request_timeout_ms</label>
+            <input
+              id="timeout-input"
+              type="number"
+              inputMode="numeric"
+              step={1}
+              value={draft}
+              onChange={(e) => props.onDraft(e.target.value)}
+              aria-invalid={!parsed.ok}
+              aria-describedby={parsed.ok ? undefined : errorId}
+              disabled={props.disabled}
+            />
+          </div>
+          <button className="btn" type="submit" disabled={props.disabled || !parsed.ok || unchanged}>
+            Save as new revision
+          </button>
+        </div>
+        {!parsed.ok && (
+          <div id={errorId} className="field-error" role="alert">{parsed.message}</div>
+        )}
+      </form>
+      <p className="muted">
+        Each save creates a new numbered revision that is never edited afterwards. The server validates the value.
+      </p>
+      {session.revisions.length > 0 && (
+        <table className="data">
+          <caption className="sr-only">Saved configuration revisions</caption>
+          <thead>
+            <tr>
+              <th scope="col">Revision</th>
+              <th scope="col">request_timeout_ms</th>
+              <th scope="col">Hash</th>
+              <th scope="col">Saved</th>
+            </tr>
+          </thead>
+          <tbody>
+            {session.revisions.map((r) => (
+              <tr key={r.revision}>
+                <td>{r.revision}{r.revision === session.configRevision && <> <span className="pill pill-ok">current</span></>}</td>
+                <td className="mono">{r.config.request_timeout_ms}</td>
+                <td className="mono">{shortHash(r.configHash)}</td>
+                <td>{new Date(r.savedAt).toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function TestRunsCard(props: { session: SessionView; running: boolean; canRun: boolean; onRun: () => void }) {
+  const { session } = props;
+  const pending = props.running || session.activeTestRunId !== null;
+  return (
+    <div className="card">
+      <h2>Tests</h2>
+      <div className="banner banner-aws" role="note">
+        <strong>Real execution.</strong> Tests run in a dedicated AWS Lambda function against the configuration revision
+        you saved. This is separate from the <em>synthetic</em> diagnostics above, which are exercise data only.
+      </div>
+      <div className="toolbar">
+        <button className="btn" type="button" disabled={!props.canRun} onClick={props.onRun}>
+          Run tests on revision {session.configRevision}
+        </button>
+        {pending && <span role="status">Running on AWS Lambda…</span>}
+      </div>
+      <p className="muted" data-testid="evidence-summary">{evidenceSummary(session)}</p>
+      {session.testRuns.length === 0 && <p className="muted">No test runs yet.</p>}
+      {session.testRuns.map((run) => (
+        <RunCard key={run.testRunId} run={run} />
+      ))}
+    </div>
+  );
+}
+
+function evidenceSummary(session: SessionView): string {
+  const e = session.currentEvidence;
+  switch (e.status) {
+    case "NONE": return "No test run covers the current configuration yet.";
+    case "PENDING": return "A test run for the current configuration is in progress.";
+    case "PASSED": return "The latest run for the current configuration passed.";
+    case "FAILED": return "The latest run for the current configuration failed.";
+    case "ERROR": return "The latest run for the current configuration did not produce results.";
+  }
+}
+
+function RunCard({ run }: { run: TestRunView }) {
+  const badge = runBadge(run);
+  const tone = badge.tone === "ok" ? "pill-ok" : badge.tone === "bad" ? "pill-bad" : "pill-progress";
+  return (
+    <section className={run.stale ? "run run-stale" : "run"} aria-label={`Test run on revision ${run.configRevision}`} data-testid="test-run">
+      <div className="row">
+        <strong>
+          Revision {run.configRevision}{" "}
+          <span className="mono muted">{shortHash(run.configHash)} · {run.configSnapshot.request_timeout_ms} ms</span>
+        </strong>
+        <span>
+          <span className={`pill ${tone}`}>{badge.label}</span>{" "}
+          {run.status !== "PENDING" && (run.stale
+            ? <span className="pill pill-stale" title="The configuration changed after this run">Stale</span>
+            : <span className="pill">Current</span>)}
+        </span>
+      </div>
+      {run.stale && (
+        <p className="muted">This result is for an older configuration and does not reflect the current one.</p>
+      )}
+      {run.executor && (
+        <p className="muted" data-testid="executor">
+          Executed on AWS Lambda ({run.executor.region}) · runner request <span className="mono">{run.executor.runnerRequestId}</span>
+          {run.executor.invokeRequestId && <> · invoke request <span className="mono">{run.executor.invokeRequestId}</span></>}
+        </p>
+      )}
+      {run.errorMessage && <div className="error" role="alert">{run.errorMessage}</div>}
+      {run.totalCount > 0 && (
+        <>
+          <p>{run.passedCount} of {run.totalCount} checks passed.</p>
+          <table className="data">
+            <caption className="sr-only">Test results</caption>
+            <thead>
+              <tr><th scope="col">Check</th><th scope="col">Result</th><th scope="col">Detail</th></tr>
+            </thead>
+            <tbody>
+              {run.cases.map((c) => (
+                <tr key={c.caseId}>
+                  <td>{c.name}</td>
+                  <td className={c.status === "FAIL" ? "lvl-ERROR" : undefined}>{c.status === "PASS" ? "Pass" : "Fail"}</td>
+                  <td>{c.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </section>
   );
 }

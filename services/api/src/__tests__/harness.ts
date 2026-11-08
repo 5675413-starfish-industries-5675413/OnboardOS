@@ -9,8 +9,11 @@
  */
 
 import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
+import type { RunnerRequest } from "@onboardos/scenario-engine";
+import { runnerHandler } from "@onboardos/test-runner";
 import { handleRequest } from "../handler.js";
 import type { ApiDeps } from "../deps.js";
+import type { RunnerClient, RunnerInvocation } from "../runner.js";
 import { FakeDynamo } from "./fakeDynamo.js";
 
 export const CORE = "test-core";
@@ -59,9 +62,37 @@ export function seedDirectory(db: FakeDynamo): void {
   for (const p of Object.values(PEOPLE) as Person[]) seedMember(db, p);
 }
 
+/**
+ * TEST-ONLY runner: invokes the REAL runner handler in-process and returns what a
+ * Lambda Invoke would (a JSON round trip, a FunctionError on throw). This is a
+ * stand-in for the network hop, not for the suite: the cases genuinely execute.
+ * It exists only in tests -- production code never imports the runner package.
+ */
+export function inProcessRunner(): RunnerClient {
+  let n = 0;
+  return {
+    async invoke(request: RunnerRequest): Promise<RunnerInvocation> {
+      n += 1;
+      const wire = JSON.parse(JSON.stringify(request)) as unknown; // what crosses the Invoke boundary
+      try {
+        const out = await runnerHandler(wire, { awsRequestId: `runner-req-${n}` });
+        return { payload: JSON.parse(JSON.stringify(out)), functionError: null, invokeRequestId: `invoke-req-${n}` };
+      } catch (e) {
+        return { payload: { errorMessage: String(e) }, functionError: "Unhandled", invokeRequestId: `invoke-req-${n}` };
+      }
+    },
+  };
+}
+
 export interface Api {
   db: FakeDynamo;
   deps: ApiDeps;
+  /** Every request the API sent to the runner (after being recorded, delegated to the active runner). */
+  runnerCalls: RunnerRequest[];
+  /** Swap the runner implementation (e.g. one that times out or lies). */
+  useRunner: (client: RunnerClient) => void;
+  /** Make deps.runner() itself throw, as an unconfigured deployment does. */
+  breakRunnerConfig: () => void;
   /** Advance the deterministic clock by n seconds. */
   tick: (seconds?: number) => void;
   call: (req: Req) => Promise<Res>;
@@ -93,12 +124,24 @@ export interface Res {
  * Pass an existing store to model a fresh Lambda instance (new process, new
  * clock) talking to data persisted by an earlier one.
  */
-export function createApi(existing?: FakeDynamo): Api {
+export function createApi(existing?: FakeDynamo, runnerImpl?: RunnerClient): Api {
   const db = existing ?? new FakeDynamo();
   let clock = Date.parse("2026-11-07T10:00:00.000Z");
+  let active: RunnerClient = runnerImpl ?? inProcessRunner();
+  let broken = false;
+  const runnerCalls: RunnerRequest[] = [];
   const deps: ApiDeps = {
     db: { client: db as unknown as ApiDeps["db"]["client"], coreTable: CORE, eventsTable: EVENTS },
     now: () => new Date(clock).toISOString(),
+    runner: () => {
+      if (broken) throw new Error("ONBOARDOS_RUNNER_FUNCTION_NAME must be set");
+      return {
+        invoke: (request) => {
+          runnerCalls.push(structuredClone(request));
+          return active.invoke(request);
+        },
+      };
+    },
   };
   if (!existing) seedDirectory(db);
 
@@ -113,6 +156,9 @@ export function createApi(existing?: FakeDynamo): Api {
   return {
     db,
     deps,
+    runnerCalls,
+    useRunner: (c) => { active = c; },
+    breakRunnerConfig: () => { broken = true; },
     tick: (s = 1) => { clock += s * 1000; },
     call: async (req) => {
       const sub = typeof req.as === "string" ? req.as : req.as?.sub;
@@ -155,6 +201,9 @@ export const R = {
   start: "POST /v1/assignments/{assignmentId}/start",
   session: "GET /v1/sessions/{sessionId}",
   action: "POST /v1/sessions/{sessionId}/actions",
+  saveConfig: "PUT /v1/sessions/{sessionId}/config",
+  runTests: "POST /v1/sessions/{sessionId}/test-runs",
+  getRun: "GET /v1/sessions/{sessionId}/test-runs/{runId}",
 } as const;
 
 export const assign = (api: Api, by: Person, employee: Person, org = ORG) =>
@@ -165,6 +214,15 @@ export const startAs = (api: Api, who: Person | string, assignmentId: string) =>
 
 export const act = (api: Api, who: Person | string, sessionId: string, expectedStateVersion: number, action: unknown) =>
   api.call({ route: R.action, as: who, params: { sessionId }, body: { expectedStateVersion, action } });
+
+export const saveConfig = (api: Api, who: Person | string, sessionId: string, expectedStateVersion: number, ms: unknown) =>
+  api.call({ route: R.saveConfig, as: who, params: { sessionId }, body: { expectedStateVersion, config: { request_timeout_ms: ms } } });
+
+export const runTests = (api: Api, who: Person | string, sessionId: string, expectedStateVersion: number) =>
+  api.call({ route: R.runTests, as: who, params: { sessionId }, body: { expectedStateVersion } });
+
+export const getRun = (api: Api, who: Person | string, sessionId: string, runId: string) =>
+  api.call({ route: R.getRun, as: who, params: { sessionId, runId } });
 
 export const OPEN_TICKET = { type: "OPEN_TICKET", ticketId: "INC-104" } as const;
 export const OPEN_RUNBOOK = { type: "OPEN_RUNBOOK", runbookId: "RB-CHECKOUT-TIMEOUT" } as const;

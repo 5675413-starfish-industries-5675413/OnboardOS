@@ -2,11 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  OnboardOS — Infrastructure Phase 1 + Phase 2A.
-  HTTP API (GET /health public; GET /v1/me JWT-protected), API Lambda,
-  private smoke-test Lambda, Cognito User Pool + SPA client, JWT authorizer,
-  DynamoDB Core + Events tables with GSIs, CloudWatch logging.
-  No Bedrock, S3, or scenario runner in this phase.
+  OnboardOS - Infrastructure Phases 1, 2A, 2B and 2C.
+  HTTP API (GET /health public; all /v1 routes JWT-protected), API Lambda,
+  private smoke-test Lambda, private scenario-runner Lambda (invoked only by the
+  API function), Cognito User Pool + SPA client, JWT authorizer, DynamoDB Core +
+  Events tables with GSIs, CloudWatch logging. No Bedrock or S3 in this phase.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -182,7 +182,7 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: "$default"
-      Description: OnboardOS HTTP API - Phase 2B
+      Description: OnboardOS HTTP API - Phase 2C
       Auth:
         # Default authorizer for all routes that declare Auth: JwtAuthorizer
         Authorizers:
@@ -200,6 +200,7 @@ Resources:
         AllowMethods:
           - GET
           - POST
+          - PUT
           - OPTIONS
         AllowHeaders:
           - Content-Type
@@ -211,7 +212,7 @@ Resources:
   OnboardOSApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: OnboardOS API - HTTP routing handler (Phase 2B)
+      Description: OnboardOS API - HTTP routing handler (Phase 2C)
       Handler: handler.httpHandler
       CodeUri: ../services/api/
       Role: !GetAtt OnboardOSApiRole.Arn
@@ -220,6 +221,8 @@ Resources:
           ONBOARDOS_CORE_TABLE: !Ref OnboardOSCoreTable
           ONBOARDOS_EVENTS_TABLE: !Ref OnboardOSEventsTable
           ONBOARDOS_ORG_ID: !Ref DemoOrgId
+          # Name only (not a secret); the API may invoke exactly this function (see OnboardOSApiRole).
+          ONBOARDOS_RUNNER_FUNCTION_NAME: !Ref OnboardOSScenarioRunner
       Events:
         # Public route — no authorizer
         ApiHealth:
@@ -287,6 +290,58 @@ Resources:
             Method: POST
             Auth:
               Authorizer: JwtAuthorizer
+        # Phase 2C routes: JWT-protected; the Lambda authorizes ownership against DynamoDB.
+        ApiSaveConfig:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/config
+            Method: PUT
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiRunTests:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/test-runs
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetTestRun:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/test-runs/{runId}
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/handler.ts
+        Minify: false
+        Sourcemap: false
+        Target: es2022
+        Format: cjs
+
+  # ── Scenario runner Lambda ────────────────────────────────────────────────
+  # PRIVATE: no Events (no HTTP route, no function URL, no triggers). The only way
+  # in is lambda:InvokeFunction, which only OnboardOSApiRole is granted. It holds
+  # the hidden INC-104 suite and runs it against a config snapshot. It has no
+  # DynamoDB access, no environment configuration and no network dependencies.
+
+  OnboardOSScenarioRunner:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: >
+        OnboardOS scenario runner - PRIVATE. Runs the fixed hidden test suite.
+        No API Gateway event source and no data-store access.
+      Handler: handler.runnerHandler
+      CodeUri: ../services/test-runner/
+      Role: !GetAtt OnboardOSRunnerRole.Arn
+      Timeout: 10
+      MemorySize: 256
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -324,13 +379,14 @@ Resources:
         External: []
 
   # ── IAM: API execution role ───────────────────────────────────────────────
-  # Phase 2B: item access + bounded queries on Core, append-only PutItem on Events.
+  # Phase 2C adds lambda:InvokeFunction on the scenario runner ONLY.
+  # Item access + bounded queries on Core, append-only PutItem on Events.
   # No Scan, no Delete, no Batch, no Events reads. See each statement below.
 
   OnboardOSApiRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Execution role for OnboardOS API Lambda (Phase 2B)
+      Description: Execution role for OnboardOS API Lambda (Phase 2C)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -351,6 +407,17 @@ Resources:
                   - logs:PutLogEvents
                 Resource:
                   - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:*"
+        - PolicyName: OnboardOSApiInvokeRunner
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Exactly one function, by ARN: not a wildcard, not a version/alias pattern.
+              - Sid: InvokeScenarioRunner
+                Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt OnboardOSScenarioRunner.Arn
         - PolicyName: OnboardOSApiDynamoDB
           PolicyDocument:
             Version: "2012-10-17"
@@ -385,6 +452,36 @@ Resources:
                   - dynamodb:PutItem
                 Resource:
                   - !GetAtt OnboardOSEventsTable.Arn
+
+  # ── IAM: Scenario runner execution role ───────────────────────────────────
+  # Logs ONLY. Deliberately no dynamodb:*, no lambda:*, no S3, no secrets. The log
+  # resource uses the stack-name pattern (as the other roles do) rather than the
+  # function's own name, which would make the role and the function depend on each other.
+
+  OnboardOSRunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Execution role for OnboardOS scenario runner Lambda (logs only)
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: OnboardOSRunnerLogging
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: AllowCloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*:*"
 
   # ── IAM: Smoke-test execution role ────────────────────────────────────────
   # Unchanged from Phase 1.
@@ -500,6 +597,12 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${OnboardOSApiFunction}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  OnboardOSRunnerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${OnboardOSScenarioRunner}"
       RetentionInDays: !Ref LogRetentionDays
 
   OnboardOSSmokeLogGroup:

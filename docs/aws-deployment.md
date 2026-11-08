@@ -787,3 +787,187 @@ previous (Phase 2A) template through the same change-set gate; this removes the 
 permissions and the extra IAM, and leaves Cognito and both tables as they are. Assignments, sessions and
 events already written stay in the tables (harmless; ignored by Phase 2A code). `sam delete` is not a
 rollback: it deletes the tables.
+
+---
+
+## Phase 2C: immutable config revisions and a real Lambda test runner
+
+**Status: Local. Not committed, not deployed, NOT VERIFIED ON AWS.** Everything in this section is verified only by
+unit/integration tests against an in-memory DynamoDB and the real handler code. No AWS request has been made
+for this phase. The first real runner invocation happens in "Live verification" below.
+
+An employee investigating INC-104 can edit `request_timeout_ms` (100-2000), save it as a numbered, immutable,
+SHA-256-hashed revision, run a fixed hidden suite in a dedicated private Lambda, and see persisted results tied
+to that exact revision. Results for an older configuration stay in history, marked **Stale**.
+
+### Routes added (all JWT-protected; the Lambda then checks ownership and ACTIVE employee membership)
+
+| Route | Body | Result |
+|---|---|---|
+| `PUT /v1/sessions/{sessionId}/config` | `{ expectedStateVersion, config: { request_timeout_ms } }` | new revision N+1; `422 CONFIG_OUT_OF_POLICY` outside 100-2000; `422 CONFIG_UNCHANGED`; `400` for wrong type/unknown field/forged `configHash`/`revision`/`status`/`passed`; `409` stale version |
+| `POST /v1/sessions/{sessionId}/test-runs` | `{ expectedStateVersion }` **only** | tests the **current** revision; `201 { testRun, session }`; `409 RUN_IN_PROGRESS`/`VERSION_CONFLICT`; `429 RUN_LIMIT_REACHED` (20) |
+| `GET /v1/sessions/{sessionId}/test-runs/{runId}` | none | `{ testRun, session }`; also closes a run that never finished (see "Stranded runs") |
+
+The client never sends a revision number, hash, suite id, expectation or result. Anything else is a `400`.
+Another user's session or run id is an opaque `404`.
+
+### Data model (same `SESSION#<id>` partition of the Core table)
+
+| Item | Key | Written | Immutable? |
+|---|---|---|---|
+| Session state (existing) | `SESSION#id / STATE` | every action | replaced under `stateVersion = :expected` |
+| Config revision N | `SK = CONFIG#<10-digit N>` | with the state change, `attribute_not_exists` | **yes**, never updated |
+| Test run | `SK = TEST#<runId>`, `runId = run_<4-digit n>_<12 hex>` | PENDING with the state change; replaced once by the terminal record only `if status = PENDING` | terminal record is final |
+| Events (Events table) | `SEQ#<stateVersion>` | with every state change | append-only |
+
+New state fields: `configRevision` (0 = scenario baseline, which is **not** stored as an item), `configHash`,
+`testRunsRequested`, `activeTestRunId`. They are optional on read, so sessions stored by Phase 2B load with the
+defaults a fresh session starts with, and are upgraded on their next write. A stored `configHash` that disagrees
+with the stored `config` is treated as corruption (HTTP 500, fail closed). A stored run whose status disagrees
+with its own cases (for example `PASSED` with a failing case) or whose snapshot does not hash to its recorded
+hash is skipped and logged, never displayed.
+
+`configHash` is `sha256:` + hex SHA-256 of the canonical (sorted-key) JSON of the config, computed only on the
+server and re-computed independently by the runner (checked with `shasum`: `800` ->
+`fa812173...0386`, `1400` -> `825d32dd...c891f`, `1800` -> `610a9550...86ca`).
+
+### Runner protocol (freeze doc, section H)
+
+1. Persist the run `PENDING`, with the session state change and the `TEST_RUN_REQUESTED` event, in one transaction.
+   The runner client is obtained **before** this write, so a misconfigured runner fails with a 500 and leaves nothing behind.
+2. Invoke `OnboardOSScenarioRunner` synchronously (`RequestResponse`, `LogType None`, aborted after 15 s; the runner's own timeout is 10 s, the API function's 29 s). The request carries the server-held snapshot, its hash and the suite identity.
+3. Validate the response strictly: schema, the echoed `testRunId`/`suiteId`/`suiteVersion`/`configHash` must equal what was sent, case ids unique and bounded, and `status = PASSED` **iff** every case passed. Any violation is `ERROR`, never a pass.
+4. Persist the terminal state (`PASSED`/`FAILED`/`ERROR`), the run record and the `TEST_RUN_COMPLETED` event (actor `system:scenario-runner`) in one transaction conditional on the run still being `PENDING`. A race with a save is retried (up to 3 reads); an already-terminal run is returned unchanged (idempotent).
+
+Stored `errorCode`s: `RUNNER_INVOCATION_FAILED`, `RUNNER_TIMEOUT`, `RUNNER_FUNCTION_ERROR`, `RUNNER_BAD_RESPONSE`,
+`RUNNER_MISMATCH`, `RUNNER_REJECTED`, `STRANDED`. Each has one fixed user-safe message; raw SDK/Lambda error text is never stored or returned.
+
+**Stranded runs.** A `PENDING` run older than 60 s cannot still be executing. The next poll (`GET .../test-runs/{runId}`) or
+the next run request records it as `ERROR / STRANDED` through the same conditional write (the first terminal write wins; a late
+original completion cannot overwrite it). A run request that performs this repair returns `409 VERSION_CONFLICT`; the client reloads and retries.
+
+### Suite (hidden) and what the employee sees
+
+The suite lives only in `services/test-runner/src/suites/inc104.ts`. Five checks: `schema-valid`, `within-policy`,
+`revision-hash-matches`, `latency-profile-a`, `latency-profile-b`. Expected: **800 -> FAILED 3/5, 1400 -> FAILED 4/5,
+1800 -> PASSED 5/5.** The employee receives case names, PASS/FAIL and a neutral message only: no thresholds, no suite id,
+no function name or ARN. Out-of-policy values cannot be saved at all (the server rejects them before a revision exists).
+
+The `executor` block (`kind: AWS_LAMBDA`, `region`, `runnerRequestId`, `invokeRequestId`) is shown so a human can find the exact
+CloudWatch log line. It is evidence that the runner function answered, not a cryptographic attestation.
+
+### Staleness
+
+Computed at read time only: a run is **current** iff its `configRevision`, `configHash` and `suiteVersion` equal the session's now.
+Finished runs that are not current are `stale: true`. Nothing is rewritten: a later save never mutates or deletes an earlier run.
+Saving while a run is in flight is allowed; that run completes and is recorded as stale.
+Reverting to an earlier value is a **new** revision, so evidence from the earlier identical value stays stale.
+
+### What the update changes in `onboardos-dev`
+
+Derived by running SAM's translator locally on the `HEAD` (Phase 2B) template and the new one and diffing the CloudFormation
+it produces. **This is not a CloudFormation change-set**; replacement behaviour is not verified. The reviewed-change-set gate
+("Pre-deploy gate", above) applies unchanged.
+
+| Resource | Change |
+|---|---|
+| `OnboardOSScenarioRunner` (`AWS::Lambda::Function`) | **Added.** Handler `handler.runnerHandler`, `CodeUri ../services/test-runner/`, Timeout 10, Memory 256, **no `Events`, no `Environment`** |
+| `OnboardOSRunnerRole` (`AWS::IAM::Role`) | **Added.** CloudWatch Logs only |
+| `OnboardOSRunnerLogGroup` | **Added.** Retention = `LogRetentionDays` |
+| `OnboardOSApiFunctionApi{SaveConfig,RunTests,GetTestRun}Permission` | **Added** (API Gateway invoke permission for the 3 routes) |
+| `OnboardOSApiFunction` | Modified: `Description`, new code, new env var `ONBOARDOS_RUNNER_FUNCTION_NAME` (`Ref` of the runner: a name, not a secret) |
+| `OnboardOSApiRole` | Modified: `Description`, `Policies` (+ `InvokeScenarioRunner`) |
+| `OnboardOSHttpApi` | Modified: OpenAPI `Body` only (+3 JWT-protected routes; CORS `AllowMethods` + `PUT`) |
+| Cognito (4 resources), both tables, smoke function/role, other log groups, stage, Outputs | **Unchanged** |
+| Removed resources | None |
+
+The runner has no output, so its name is not published; see step 2 below to look it up.
+
+### IAM matrix (what each identity can do)
+
+| Identity | Allowed | Explicitly not |
+|---|---|---|
+| `OnboardOSApiRole` (existing + new) | Core `GetItem`/`PutItem`/`UpdateItem`; Core+GSI1+GSI2 `Query`; Events `PutItem`; **`lambda:InvokeFunction` on the runner ARN only**; logs | `Scan`, `Delete*`, `Batch*`, Events reads, any other Lambda, wildcard resources |
+| `OnboardOSRunnerRole` (new) | `logs:CreateLogGroup/CreateLogStream/PutLogEvents` on `/aws/lambda/<stack>-*` | any DynamoDB, any Lambda, S3, Secrets Manager, SSM, KMS, Bedrock |
+| Runner function resource policy | none added: no HTTP route, no function URL, no event source, no `AWS::Lambda::Permission` | invocation by anything but an IAM principal holding `lambda:InvokeFunction` |
+| Browser / any end user | the 3 JWT-protected routes above | calling the runner, reading the suite, supplying results |
+
+The API's DynamoDB statements are unchanged: revisions and runs are `PutItem`s and `Query`s on the Core table.
+The log-group resource is a stack-name pattern (as for the other roles), because naming the function's own log group would make the role and function depend on each other.
+
+### Deploy procedure
+
+Same reviewed-change-set procedure as before, with the same parameters. Expected change-set:
+
+- `Add`: `OnboardOSScenarioRunner`, `OnboardOSRunnerRole`, `OnboardOSRunnerLogGroup`, the three `OnboardOSApiFunctionApi*Permission`.
+- `Modify`, `Replacement: False`: `OnboardOSApiFunction`, `OnboardOSApiRole`, `OnboardOSHttpApi`.
+- **STOP** if Cognito, either table, or the smoke function appears, or any `Remove` / `Replacement: True|Conditional` appears.
+- Roles are unnamed, so the existing `CAPABILITY_IAM` is sufficient (do not add `CAPABILITY_NAMED_IAM`).
+
+New Workshop permission this exercises: creating one more Lambda function and IAM role, and `lambda:InvokeFunction` at runtime. If the
+account restricts Lambda invocation or IAM role creation, step 1 below fails loudly; there is no fallback that fakes a result.
+
+### Live verification (NOT RUN: execute after deployment; every row must pass before calling this "cloud verified")
+
+`FN` = the runner's physical name:
+```bash
+aws cloudformation describe-stack-resource --stack-name onboardos-dev --region us-east-1 \
+  --logical-resource-id OnboardOSScenarioRunner --query "StackResourceDetail.PhysicalResourceId" --output text
+```
+
+| # | Who | Action | Expected |
+|---|---|---|---|
+| 1 | operator (needs invoke rights) | invoke the runner directly for 800, 1400, 1800 (commands below) | `FAILED` 3 of 5; `FAILED` 4 of 5; `PASSED` 5 of 5; a `executor.requestId` in each |
+| 2 | operator | invoke with a **wrong** `configHash` | `{"ok":false,"errorCode":"HASH_MISMATCH"}` |
+| 3 | operator | confirm no public path: `aws lambda list-function-url-configs --function-name $FN`; `aws lambda get-policy --function-name $FN` | no URL config; no resource policy (or `ResourceNotFoundException`) |
+| 4 | employee | open the session, Save `1800`, **Run tests** | revision 1; run **Passed 5/5**; "Executed on AWS Lambda" with two request ids |
+| 5 | employee | Save `1400`, Run tests | run **Failed 4/5**; the earlier 1800 run is shown **Stale**, still Passed |
+| 6 | employee | Save `800`, then Save `1800`, without running | revision 4 (after steps 4 and 5); no current evidence; all earlier runs Stale |
+| 7 | employee | refresh the page | same revisions, runs and stale flags (read from DynamoDB) |
+| 8 | curl, employee token | `PUT .../config` with `{"expectedStateVersion":N,"config":{"request_timeout_ms":5000}}` | `422 CONFIG_OUT_OF_POLICY` |
+| 9 | curl, employee token | `POST .../test-runs` with `{"expectedStateVersion":N,"status":"PASSED"}` | `400` |
+| 10 | curl, another employee's / manager's token | all 3 routes on that session | `404` |
+| 11 | CloudWatch | `/aws/lambda/<RunnerFunctionName>` | one `scenario_run` JSON line per run with the same `requestId` as the run's `runnerRequestId` |
+
+Direct invocation (uses the canonical hashes; payload shown for 800):
+```bash
+aws lambda invoke --function-name "$FN" --region us-east-1 --cli-binary-format raw-in-base64-out \
+  --payload '{"testRunId":"run_0001_000000000000","scenarioId":"inc-104","scenarioVersion":1,"suiteId":"inc-104-checkout-timeout","suiteVersion":1,"configSnapshot":{"request_timeout_ms":800},"configHash":"sha256:fa812173342a39f8644ec44f9009cbd00be1f92c8a9c97e0d45fb00006bf0386"}' \
+  /tmp/runner-out.json && cat /tmp/runner-out.json
+# 1400 -> sha256:825d32dd1b2f4f98e7d7ecd536304ebbd8fc2ae554f31ac6b2e76d5008dc891f
+# 1800 -> sha256:610a9550b739187eb3b6e8299258063ffdde813eed492505e596e2dd036386ca
+```
+
+Read-only data check after step 4 (table name from the stack outputs):
+```bash
+aws dynamodb query --table-name <CoreTableName> --region us-east-1 \
+  --key-condition-expression "PK = :p AND begins_with(SK, :s)" \
+  --expression-attribute-values '{":p":{"S":"SESSION#<sessionId>"},":s":{"S":"TEST#"}}' \
+  --query "Items[].[SK.S,status.S,configRevision.N,configHash.S]" --output table
+```
+
+Open question to resolve by observation in step 11: whether the `invokeRequestId` the API receives equals the runner's own
+`context.awsRequestId`. AWS documents the invoke response's request id; this code does **not** assume they are equal and does not
+enforce it. Record what you observe.
+
+### Known limitations (Phase 2C)
+
+| # | Limitation | Impact |
+|---|---|---|
+| 1 | **Nothing here is verified on AWS** | the Lambda `Invoke` call, IAM, the JWT authorizer, real DynamoDB conditions and the UI are untested until the table above is run |
+| 2 | The runner is trusted to execute honestly | the API validates shape, echoes and internal consistency, but a *compromised* runner that returned self-consistent false results could not be detected; the defence is that only the stack's code is deployed there, it holds no data access, and no one else may invoke it |
+| 3 | Synchronous invocation inside an API request | a slow runner makes the request slow (bounded at 15 s); the client polls if it loses the response |
+| 4 | Stranded-run repair happens on a poll or the next run request | a PENDING run can remain visible for up to 60 s after a crash, plus the time until someone polls |
+| 5 | A stored run or revision that fails validation is hidden (logged), not repaired | the employee sees fewer items rather than false ones |
+| 6 | 20 runs and 30 revisions per session; one run in flight | by design; bounded storage and cost |
+| 7 | The UI is not covered by component tests | request shapes, validation helpers and presentation rules are unit-tested; the React page itself is type-checked and built only |
+| 8 | Employees can still probe thresholds by experiment | pass/fail is the product; it is capped at 20 runs and gives no numbers |
+| 9 | `invokeRequestId` vs. runner `requestId` equality is unverified | see the open question above |
+| 10 | No Bedrock, report submission, manager review of runs, or step functions | later slices |
+
+### Rollback
+
+Redeploy the Phase 2B template through the same change-set gate. This removes the runner, its role and log group, the three routes and
+permissions and the `InvokeFunction` statement, and leaves Cognito and both tables as they are. Stored revisions, runs and the extra state
+fields remain in the Core table (harmless to Phase 2B code, which ignores unknown attributes; its next write to a session drops the
+Phase 2C state fields, leaving revision and run items orphaned but intact). `sam delete` is not a rollback: it deletes the tables.

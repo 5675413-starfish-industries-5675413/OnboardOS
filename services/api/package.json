@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "3.1164.0",
+    "@aws-sdk/client-lambda": "3.1164.0",
     "@aws-sdk/lib-dynamodb": "3.1164.0",
     "@onboardos/contracts": "*",
     "@onboardos/scenario-engine": "*",
@@ -16,6 +17,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/aws-lambda": "8.10.164"
+    "@types/aws-lambda": "8.10.164",
+    "@onboardos/test-runner": "*"
   }
 }

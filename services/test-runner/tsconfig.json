@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "paths": {
+      "@onboardos/contracts": ["../../packages/contracts/src/index.ts"],
+      "@onboardos/scenario-engine": ["../../packages/scenario-engine/src/index.ts"]
+    }
+  },
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/scenario-engine" }
+  ],
+  "include": ["src/**/*"]
+}

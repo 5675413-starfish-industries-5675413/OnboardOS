@@ -1,0 +1,11 @@
+{
+  "name": "@onboardos/test-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OnboardOS scenario runner Lambda: executes the fixed hidden INC-104 suite against an immutable config snapshot. No DynamoDB, no network, no arbitrary code execution.",
+  "dependencies": {
+    "@onboardos/contracts": "*",
+    "@onboardos/scenario-engine": "*",
+    "esbuild": "0.28.2"
+  }
+}

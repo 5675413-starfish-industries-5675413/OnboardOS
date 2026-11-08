@@ -57,7 +57,14 @@ export const DiagnosticsSchema = z.object({
   entries: z.array(LogEntrySchema),
 });
 
-/** The configuration the employee investigates and (in a later slice) edits. */
+/**
+ * Policy bounds for `request_timeout_ms`. Shared so the browser can give
+ * immediate feedback; the SERVER re-validates and is the only authority.
+ */
+export const REQUEST_TIMEOUT_MIN_MS = 100;
+export const REQUEST_TIMEOUT_MAX_MS = 2000;
+
+/** The configuration the employee investigates and edits. */
 export const IncidentConfigSchema = z.strictObject({
   request_timeout_ms: z.number().int(),
 });

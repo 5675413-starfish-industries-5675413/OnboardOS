@@ -21,12 +21,25 @@ import {
   ScenarioIdSchema,
   SessionPhaseSchema,
   SessionViewSchema,
+  TestCaseResultSchema,
+  TestRunViewSchema,
+  ConfigRevisionViewSchema,
   UserSubSchema,
   ViewedSchema,
   type AssignmentView,
   type SessionView,
+  type TestRunView,
 } from "@onboardos/contracts";
-import type { DomainEvent, PublishedScenario, WorkplaceState } from "@onboardos/scenario-engine";
+import {
+  CONFIG_HASH_PATTERN,
+  TEST_RUN_ID_PATTERN,
+  configHash,
+  isCurrentRun,
+  type DomainEvent,
+  type PublishedScenario,
+  type RunnerCase,
+  type WorkplaceState,
+} from "@onboardos/scenario-engine";
 import { ASSIGNMENT_ID_PATTERN, SESSION_ID_PATTERN } from "./ids.js";
 
 // ---------------------------------------------------------------------------
@@ -37,6 +50,13 @@ export const keys = {
   member: (orgId: string, sub: string) => ({ PK: `ORG#${orgId}`, SK: `MEMBER#${sub}` }),
   assignment: (assignmentId: string) => ({ PK: `ASSIGN#${assignmentId}`, SK: "META" as const }),
   session: (sessionId: string) => ({ PK: `SESSION#${sessionId}`, SK: "STATE" as const }),
+  /** Immutable saved revision N (1-based). 10-digit padding keeps lexical order == numeric order. */
+  revision: (sessionId: string, revision: number) => ({
+    PK: `SESSION#${sessionId}`,
+    SK: `CONFIG#${String(revision).padStart(10, "0")}`,
+  }),
+  /** One test run. Run ids start with a zero-padded run number, so key order == creation order. */
+  testRun: (sessionId: string, testRunId: string) => ({ PK: `SESSION#${sessionId}`, SK: `TEST#${testRunId}` }),
   event: (sessionId: string, sequence: number) => ({
     PK: `SESSION#${sessionId}`,
     SK: `SEQ#${String(sequence).padStart(10, "0")}`,
@@ -211,11 +231,21 @@ const WorkplaceStateSchema = z
     phase: SessionPhaseSchema,
     stateVersion: z.number().int().nonnegative(),
     config: IncidentConfigSchema,
+    // Phase 2C fields. OPTIONAL on read so sessions stored by Phase 2B still load;
+    // defaults below are exactly the values a fresh session starts with.
+    configRevision: z.number().int().nonnegative().optional(),
+    configHash: z.string().regex(CONFIG_HASH_PATTERN).optional(),
+    testRunsRequested: z.number().int().nonnegative().optional(),
+    activeTestRunId: z.string().regex(TEST_RUN_ID_PATTERN).nullable().optional(),
     viewed: ViewedSchema,
     startedAt: z.string().nullable(),
     updatedAt: z.string(),
   })
-  .refine((s) => s.PK === keys.session(s.sessionId).PK, { message: "session key does not match content" });
+  .refine((s) => s.PK === keys.session(s.sessionId).PK, { message: "session key does not match content" })
+  // A stored hash that disagrees with the stored config means corruption: fail closed.
+  .refine((s) => s.configHash === undefined || s.configHash === configHash(s.config), {
+    message: "stored configHash does not match stored config",
+  });
 
 /** Parse a stored session into the engine's state type (extra storage attributes dropped). */
 export function parseSessionState(item: unknown): WorkplaceState | null {
@@ -232,6 +262,10 @@ export function parseSessionState(item: unknown): WorkplaceState | null {
     phase: d.phase,
     stateVersion: d.stateVersion,
     config: d.config,
+    configRevision: d.configRevision ?? 0,
+    configHash: configHash(d.config),
+    testRunsRequested: d.testRunsRequested ?? 0,
+    activeTestRunId: d.activeTestRunId ?? null,
     viewed: d.viewed,
     startedAt: d.startedAt,
     updatedAt: d.updatedAt,
@@ -256,8 +290,241 @@ export function eventItem(state: WorkplaceState, event: DomainEvent): Record<str
   };
 }
 
+// ---------------------------------------------------------------------------
+// Config revisions (immutable)
+// ---------------------------------------------------------------------------
+
+const ConfigRevisionRecordSchema = z
+  .looseObject({
+    PK: z.string(),
+    SK: z.string(),
+    entityType: z.literal("CONFIG_REVISION"),
+    sessionId: z.string().regex(SESSION_ID_PATTERN),
+    organizationId: z.string(),
+    revision: z.number().int().positive(),
+    config: IncidentConfigSchema,
+    configHash: z.string().regex(CONFIG_HASH_PATTERN),
+    savedBySub: UserSubSchema,
+    savedAt: z.string(),
+    stateVersion: z.number().int().positive(),
+  })
+  .refine(
+    (r) => {
+      const k = keys.revision(r.sessionId, r.revision);
+      return r.PK === k.PK && r.SK === k.SK && r.configHash === configHash(r.config);
+    },
+    { message: "revision keys/hash do not match content" },
+  );
+export type ConfigRevisionRecord = z.infer<typeof ConfigRevisionRecordSchema>;
+
+export function parseConfigRevision(item: unknown): ConfigRevisionRecord | null {
+  const parsed = ConfigRevisionRecordSchema.safeParse(item);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Built from the engine's NEXT state, so the stored revision can never disagree with the session. */
+export function buildConfigRevisionRecord(next: WorkplaceState, savedBySub: string, savedAt: string): ConfigRevisionRecord {
+  return {
+    ...keys.revision(next.sessionId, next.configRevision),
+    entityType: "CONFIG_REVISION",
+    sessionId: next.sessionId,
+    organizationId: next.organizationId,
+    revision: next.configRevision,
+    config: { ...next.config },
+    configHash: next.configHash,
+    savedBySub,
+    savedAt,
+    stateVersion: next.stateVersion,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Test runs
+// ---------------------------------------------------------------------------
+
+/** Machine codes stored on an ERROR run, each with one fixed, user-safe message. Raw errors are never stored. */
+export const RUN_ERROR_MESSAGES = {
+  RUNNER_INVOCATION_FAILED: "The test runner could not be reached. No test results were produced.",
+  RUNNER_TIMEOUT: "The test runner did not respond in time. No test results were produced.",
+  RUNNER_FUNCTION_ERROR: "The test runner failed while executing. No test results were produced.",
+  RUNNER_BAD_RESPONSE: "The test runner returned an unusable response. Its results were discarded.",
+  RUNNER_MISMATCH: "The test runner's response did not match the request. Its results were discarded.",
+  RUNNER_REJECTED: "The test runner rejected the request. No test results were produced.",
+  STRANDED: "The test run did not complete. No test results were produced.",
+} as const;
+export type RunErrorCode = keyof typeof RUN_ERROR_MESSAGES;
+
+export type RunOutcome =
+  | {
+      kind: "COMPLETED";
+      status: "PASSED" | "FAILED";
+      cases: RunnerCase[];
+      executor: { region: string; runnerRequestId: string; invokeRequestId: string | null };
+    }
+  | { kind: "ERROR"; errorCode: RunErrorCode };
+
+const TestRunRecordSchema = z
+  .looseObject({
+    PK: z.string(),
+    SK: z.string(),
+    entityType: z.literal("TEST_RUN"),
+    sessionId: z.string().regex(SESSION_ID_PATTERN),
+    organizationId: z.string(),
+    testRunId: z.string().regex(TEST_RUN_ID_PATTERN),
+    requestedBySub: UserSubSchema,
+    status: z.enum(["PENDING", "PASSED", "FAILED", "ERROR"]),
+    scenarioId: ScenarioIdSchema,
+    scenarioVersion: z.number().int().positive(),
+    /** Internal only: never copied into the client view. */
+    suiteId: z.string(),
+    suiteVersion: z.number().int().positive(),
+    configRevision: z.number().int().nonnegative(),
+    configHash: z.string().regex(CONFIG_HASH_PATTERN),
+    configSnapshot: IncidentConfigSchema,
+    createdAt: z.string(),
+    completedAt: z.string().nullable(),
+    cases: z.array(TestCaseResultSchema),
+    passedCount: z.number().int().nonnegative(),
+    totalCount: z.number().int().nonnegative(),
+    executor: z
+      .object({ region: z.string(), runnerRequestId: z.string(), invokeRequestId: z.string().nullable() })
+      .nullable(),
+    errorCode: z.string().nullable(),
+    errorMessage: z.string().nullable(),
+  })
+  .refine(
+    (r) => {
+      const k = keys.testRun(r.sessionId, r.testRunId);
+      if (r.PK !== k.PK || r.SK !== k.SK) return false;
+      if (r.configHash !== configHash(r.configSnapshot)) return false;
+      const passes = r.cases.filter((c) => c.status === "PASS").length;
+      if (r.passedCount !== passes || r.totalCount !== r.cases.length) return false;
+      // A stored PASSED/FAILED must be consistent with its own cases, or it is not shown.
+      if (r.status === "PASSED") return r.totalCount > 0 && passes === r.totalCount && r.executor !== null && r.completedAt !== null;
+      if (r.status === "FAILED") return r.totalCount > 0 && passes < r.totalCount && r.executor !== null && r.completedAt !== null;
+      if (r.status === "ERROR") return r.totalCount === 0 && r.errorCode !== null && r.completedAt !== null;
+      return r.completedAt === null && r.totalCount === 0; // PENDING
+    },
+    { message: "test run is internally inconsistent" },
+  );
+export type TestRunRecord = z.infer<typeof TestRunRecordSchema>;
+
+export function parseTestRun(item: unknown): TestRunRecord | null {
+  const parsed = TestRunRecordSchema.safeParse(item);
+  return parsed.success ? parsed.data : null;
+}
+
+/** The PENDING record persisted BEFORE the runner is invoked. */
+export function buildPendingRun(input: {
+  state: WorkplaceState;
+  testRunId: string;
+  requestedBySub: string;
+  scenario: PublishedScenario;
+  now: string;
+}): TestRunRecord {
+  const { state, testRunId, requestedBySub, scenario, now } = input;
+  return {
+    ...keys.testRun(state.sessionId, testRunId),
+    entityType: "TEST_RUN",
+    sessionId: state.sessionId,
+    organizationId: state.organizationId,
+    testRunId,
+    requestedBySub,
+    status: "PENDING",
+    scenarioId: state.scenarioId,
+    scenarioVersion: state.scenarioVersion,
+    suiteId: scenario.testSuiteId,
+    suiteVersion: scenario.testSuiteVersion,
+    // The snapshot is the config AT REQUEST TIME, copied; later edits cannot reach it.
+    configRevision: state.configRevision,
+    configHash: state.configHash,
+    configSnapshot: { ...state.config },
+    createdAt: now,
+    completedAt: null,
+    cases: [],
+    passedCount: 0,
+    totalCount: 0,
+    executor: null,
+    errorCode: null,
+    errorMessage: null,
+  };
+}
+
+/** The terminal record that replaces a PENDING one. Identity fields are carried over unchanged. */
+export function buildTerminalRun(pending: TestRunRecord, outcome: RunOutcome, now: string): TestRunRecord {
+  if (outcome.kind === "ERROR") {
+    return {
+      ...pending,
+      status: "ERROR",
+      completedAt: now,
+      cases: [],
+      passedCount: 0,
+      totalCount: 0,
+      executor: null,
+      errorCode: outcome.errorCode,
+      errorMessage: RUN_ERROR_MESSAGES[outcome.errorCode],
+    };
+  }
+  const cases = outcome.cases.map((c) => ({ caseId: c.caseId, name: c.name, status: c.status, message: c.message }));
+  return {
+    ...pending,
+    status: outcome.status,
+    completedAt: now,
+    cases,
+    passedCount: cases.filter((c) => c.status === "PASS").length,
+    totalCount: cases.length,
+    executor: { ...outcome.executor },
+    errorCode: null,
+    errorMessage: null,
+  };
+}
+
+/**
+ * Client projection of one run. `current`/`stale` are DERIVED here from the
+ * session's present revision/hash and the scenario's suite version; nothing about
+ * staleness is stored, so history is never rewritten.
+ */
+export function toTestRunView(r: TestRunRecord, state: WorkplaceState, scenario: PublishedScenario): TestRunView {
+  const current = isCurrentRun(r, state, scenario.testSuiteVersion);
+  return TestRunViewSchema.parse({
+    testRunId: r.testRunId,
+    status: r.status,
+    configRevision: r.configRevision,
+    configHash: r.configHash,
+    configSnapshot: r.configSnapshot,
+    suiteVersion: r.suiteVersion,
+    createdAt: r.createdAt,
+    completedAt: r.completedAt,
+    cases: r.cases,
+    passedCount: r.passedCount,
+    totalCount: r.totalCount,
+    executor: r.executor ? { kind: "AWS_LAMBDA", ...r.executor } : null,
+    errorCode: r.errorCode,
+    errorMessage: r.errorMessage,
+    current,
+    stale: r.status !== "PENDING" && !current,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Session view
+// ---------------------------------------------------------------------------
+
+/** The bounded revision and run history that accompanies a session. Newest first. */
+export interface SessionHistory {
+  revisions: ConfigRevisionRecord[];
+  runs: TestRunRecord[];
+}
+export const EMPTY_HISTORY: SessionHistory = { revisions: [], runs: [] };
+
 /** Client projection of a session. Parsing through the contract strips anything not public. */
-export function toSessionView(state: WorkplaceState, scenario: PublishedScenario): SessionView {
+export function toSessionView(
+  state: WorkplaceState,
+  scenario: PublishedScenario,
+  history: SessionHistory = EMPTY_HISTORY,
+): SessionView {
+  const testRuns = history.runs.map((r) => toTestRunView(r, state, scenario));
+  const latestCurrent = testRuns.find((r) => r.current);
   return SessionViewSchema.parse({
     sessionId: state.sessionId,
     assignmentId: state.assignmentId,
@@ -267,6 +534,16 @@ export function toSessionView(state: WorkplaceState, scenario: PublishedScenario
     phase: state.phase,
     stateVersion: state.stateVersion,
     config: state.config,
+    configRevision: state.configRevision,
+    configHash: state.configHash,
+    revisions: history.revisions.map((r) =>
+      ConfigRevisionViewSchema.parse({ revision: r.revision, config: r.config, configHash: r.configHash, savedAt: r.savedAt }),
+    ),
+    testRuns,
+    currentEvidence: latestCurrent
+      ? { status: latestCurrent.status, testRunId: latestCurrent.testRunId }
+      : { status: "NONE", testRunId: null },
+    activeTestRunId: state.activeTestRunId,
     viewed: state.viewed,
     startedAt: state.startedAt,
     updatedAt: state.updatedAt,
