@@ -57,24 +57,71 @@ function listUnder(block: string, key: string): string[] {
   return out;
 }
 
+
+/** The API function's HttpApi events: name, method, path and the authorizer (if any). */
+function apiRoutes(): Array<{ name: string; method: string; path: string; authorizer: string | null }> {
+  const lines = resource("OnboardOSApiFunction").split("\n");
+  const out: Array<{ name: string; method: string; path: string; authorizer: string | null }> = [];
+  let cur: { name: string; method: string; path: string; authorizer: string | null } | null = null;
+  let inEvents = false;
+  for (const line of lines) {
+    if (/^ {6}Events:$/.test(line)) { inEvents = true; continue; }
+    if (inEvents && /^ {4}\S/.test(line)) break; // left the function's Properties (e.g. Metadata)
+    if (!inEvents) continue;
+    const header = line.match(/^ {8}(\w+):$/);
+    if (header) { cur = { name: header[1] as string, method: "", path: "", authorizer: null }; out.push(cur); continue; }
+    if (!cur) continue;
+    const path = line.match(/^\s+Path:\s*(\S+)/); if (path) cur.path = path[1] as string;
+    const method = line.match(/^\s+Method:\s*(\S+)/); if (method) cur.method = method[1] as string;
+    const auth = line.match(/^\s+Authorizer:\s*(\S+)/); if (auth) cur.authorizer = auth[1] as string;
+  }
+  return out;
+}
+
+/** IAM statements of a role's inline policy, by Sid, with the actions and resources they name. */
+function statements(roleName: string): Array<{ sid: string; actions: string[]; resources: string }> {
+  return resource(roleName)
+    .split(/\n\s*- Sid:\s*/)
+    .slice(1)
+    .map((chunk) => ({
+      sid: (chunk.split("\n")[0] as string).trim(),
+      actions: [...chunk.matchAll(/^\s+- ([a-z0-9-]+:[A-Za-z*]+)\s*$/gm)].map((m) => m[1] as string),
+      resources: chunk.slice(chunk.indexOf("Resource:")),
+    }));
+}
+
 describe("API routes and authorization", () => {
   const api = resource("OnboardOSApiFunction");
 
-  it("declares exactly two HTTP routes: public GET /health and protected GET /v1/me", () => {
-    const paths = [...api.matchAll(/^\s+Path:\s*(\S+)/gm)].map((m) => m[1]);
-    expect(paths.sort()).toEqual(["/health", "/v1/me"]);
+  const EXPECTED_ROUTES = [
+    "GET /health",
+    "GET /v1/me",
+    "GET /v1/orgs/{orgId}/assignable-employees",
+    "GET /v1/orgs/{orgId}/assignments",
+    "POST /v1/orgs/{orgId}/assignments",
+    "POST /v1/assignments/{assignmentId}/start",
+    "GET /v1/sessions/{sessionId}",
+    "POST /v1/sessions/{sessionId}/actions",
+  ];
+
+  it("declares exactly the intended routes: nothing extra can be added silently", () => {
+    const declared = apiRoutes().map((r) => `${r.method} ${r.path}`);
+    expect([...declared].sort()).toEqual([...EXPECTED_ROUTES].sort());
   });
 
-  it("leaves GET /health without any authorizer (Phase 1 behaviour preserved)", () => {
-    const health = api.slice(api.indexOf("ApiHealth:"), api.indexOf("ApiGetMe:"));
-    expect(health).toContain("Path: /health");
-    expect(health).not.toMatch(/Auth/);
+  it("makes GET /health the ONLY public route (Phase 1 behaviour preserved)", () => {
+    const unauthenticated = apiRoutes().filter((r) => r.authorizer === null);
+    expect(unauthenticated.map((r) => `${r.method} ${r.path}`)).toEqual(["GET /health"]);
   });
 
-  it("protects GET /v1/me with the JWT authorizer", () => {
-    const me = api.slice(api.indexOf("ApiGetMe:"));
-    expect(me).toMatch(/Path:\s*\/v1\/me/);
-    expect(me).toMatch(/Authorizer:\s*JwtAuthorizer/);
+  it("protects every other route with the JWT authorizer", () => {
+    for (const r of apiRoutes().filter((x) => x.path !== "/health")) {
+      expect(r.authorizer, `${r.method} ${r.path}`).toBe("JwtAuthorizer");
+    }
+  });
+
+  it("only uses methods the API implements (no PUT/PATCH/DELETE routes)", () => {
+    for (const r of apiRoutes()) expect(["GET", "POST"]).toContain(r.method);
   });
 
   it("validates tokens against this user pool and this SPA client", () => {
@@ -89,6 +136,10 @@ describe("API routes and authorization", () => {
     expect(listUnder(http, "AllowOrigins")).toEqual(["http://localhost:5173"]);
     expect(listUnder(http, "AllowHeaders")).toContain("Authorization");
     expect(http).not.toMatch(/"\*"|'\*'/);
+  });
+
+  it("allows only the HTTP methods the API implements for cross-origin calls", () => {
+    expect([...listUnder(resource("OnboardOSHttpApi"), "AllowMethods")].sort()).toEqual(["GET", "OPTIONS", "POST"]);
   });
 });
 
@@ -108,13 +159,54 @@ describe("private smoke-test function (Phase 1) is unchanged", () => {
 });
 
 describe("IAM least privilege", () => {
-  it("gives the API role exactly dynamodb:GetItem on the Core table and nothing else", () => {
-    const role = resource("OnboardOSApiRole");
-    const dynamoActions = [...role.matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
-    expect(dynamoActions).toEqual(["dynamodb:GetItem"]);
-    expect(role).toContain("!GetAtt OnboardOSCoreTable.Arn");
-    expect(role).not.toContain("OnboardOSEventsTable");
-    expect(role).not.toContain("/index/");
+  describe("API role (Phase 2B): exactly what the implemented routes use", () => {
+    const role = "OnboardOSApiRole";
+    const stmts = () => statements(role);
+    const byId = (sid: string) => {
+      const found = stmts().find((x) => x.sid === sid);
+      if (!found) throw new Error(`statement ${sid} not found`);
+      return found;
+    };
+
+    it("grants Core item access: GetItem, PutItem, UpdateItem on the table ARN only", () => {
+      const st = byId("CoreItemAccess");
+      expect([...st.actions].sort()).toEqual(["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]);
+      expect(st.resources).toContain("!GetAtt OnboardOSCoreTable.Arn");
+      expect(st.resources).not.toContain("OnboardOSEventsTable");
+      expect(st.resources).not.toContain("/index/");
+    });
+
+    it("grants Query only on the Core table and exactly the two named indexes (never a wildcard index)", () => {
+      const st = byId("CoreQuery");
+      expect(st.actions).toEqual(["dynamodb:Query"]);
+      expect(st.resources).toContain("${OnboardOSCoreTable.Arn}/index/GSI1");
+      expect(st.resources).toContain("${OnboardOSCoreTable.Arn}/index/GSI2");
+      expect(st.resources).not.toContain("/index/*");
+      expect(st.resources).not.toContain("OnboardOSEventsTable");
+    });
+
+    it("lets the API only APPEND to the Events table: PutItem, nothing else", () => {
+      const st = byId("EventsAppend");
+      expect(st.actions).toEqual(["dynamodb:PutItem"]);
+      expect(st.resources).toContain("!GetAtt OnboardOSEventsTable.Arn");
+      expect(st.resources).not.toContain("OnboardOSCoreTable");
+    });
+
+    it("has no other DynamoDB statement, and the complete action set is exactly the four used", () => {
+      expect(stmts().map((x) => x.sid).filter((sid) => !/Logging|Logs/i.test(sid)).sort())
+        .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend"]);
+      const all = [...resource(role).matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
+      expect([...new Set(all)].sort()).toEqual([
+        "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem",
+      ]);
+    });
+
+    it("never grants Scan, Delete, Batch, ConditionCheck, table administration or Events reads", () => {
+      const text = resource(role);
+      for (const forbidden of ["Scan", "DeleteItem", "BatchWriteItem", "BatchGetItem", "ConditionCheckItem", "DescribeTable", "CreateTable", "DeleteTable", "UpdateTable", "dynamodb:*"]) {
+        expect(text, forbidden).not.toContain(forbidden);
+      }
+    });
   });
 
   it("keeps the smoke role to the four Phase 1 actions on the Core table only", () => {

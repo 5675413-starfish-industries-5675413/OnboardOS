@@ -1,0 +1,12 @@
+{
+  "name": "@onboardos/scenario-fixtures",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Employee-visible scenario fixtures ONLY. Hidden test suites, expected results and rubrics must never be added to this package.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@onboardos/contracts": "*",
+    "@onboardos/scenario-engine": "*"
+  }
+}

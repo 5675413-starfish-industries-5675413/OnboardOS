@@ -658,3 +658,132 @@ Implications: run builds from the repository root after `npm install`/`npm ci`. 
 | 9 | Managed login look | Cognito's default style; no custom branding | Acceptable for the demo; customize later via `Settings`/`Assets` |
 | 10 | Feature plan cost | `ESSENTIALS` is a priced plan | See the Amazon Cognito pricing page; the explicit setting makes the choice visible |
 | 11 | Sign-in factors | The pool does not set `SignInPolicy`; passwordless/passkey methods are expected to stay off (password only) but that default is unverified | Confirm the sign-in form shows only password |
+
+---
+
+## Phase 2B: INC-104 scenario and assignment slice
+
+**Status: Local.** Nothing in this section has been deployed or verified against AWS. It adds a manager →
+employee workflow: a manager assigns INC-104, the employee finds it, starts the investigation, and reads the
+authoritative session state back after a refresh. Cognito and the data tier are not touched.
+
+### Routes
+
+| Route | Who (decided server-side) | Purpose |
+|---|---|---|
+| `GET /health` | public | unchanged |
+| `GET /v1/me` | any signed-in user | unchanged |
+| `GET /v1/orgs/{orgId}/assignable-employees` | `manager`, `org_admin` | employees the caller may assign (team-scoped for managers) |
+| `GET /v1/orgs/{orgId}/assignments` | `employee`, `manager`, `org_admin` | employee: own assignments; manager/admin: assignments they created |
+| `POST /v1/orgs/{orgId}/assignments` | `manager`, `org_admin` | assign the latest published INC-104 (idempotent) |
+| `POST /v1/assignments/{assignmentId}/start` | the assigned `employee` only | start or resume (idempotent) |
+| `GET /v1/sessions/{sessionId}` | the session's `employee` only | authoritative state |
+| `POST /v1/sessions/{sessionId}/actions` | the session's `employee` only | `OPEN_TICKET` / `OPEN_RUNBOOK` / `OPEN_DIAGNOSTICS` with `expectedStateVersion` |
+
+Every route except `/health` sits behind the JWT authorizer; the Lambda then authorizes against the DynamoDB
+membership record and ownership. Denials are an opaque `404` (no access / not yours / does not exist) or `403`
+(a real member lacking the role). Request bodies are strict: a forged `role`, `organizationId`, `status` or
+`passed` field is a `400`, never silently ignored.
+
+### What the update changes in `onboardos-dev`
+
+Derived by running SAM's translator locally on the deployed Phase 2A template (`main`) and the new one and
+diffing the resulting CloudFormation. **This is not a CloudFormation change-set**, so replacement behaviour is
+not verified; the gate in "Pre-deploy gate" above still applies unchanged.
+
+| Resource | Change |
+|---|---|
+| 6 x `OnboardOSApiFunctionApi{ListAssignableEmployees,ListAssignments,CreateAssignment,StartAssignment,GetSession,SessionAction}Permission` | **Added** (Lambda invoke permissions for the new routes) |
+| `OnboardOSApiFunction` | Modified: `Description`, new code |
+| `OnboardOSApiRole` | Modified: `Description`, `Policies` (see matrix) |
+| `OnboardOSHttpApi` | Modified: OpenAPI `Body` only (+6 routes, all JWT-protected; CORS +`POST`) |
+| `OnboardOSUserPool`, `OnboardOSSpaClient`, `OnboardOSUserPoolDomain`, `OnboardOSManagedLoginBranding` | **Unchanged** (Cognito is not touched) |
+| `OnboardOSCoreTable`, `OnboardOSEventsTable` | **Unchanged** |
+| `OnboardOSSmokeFunction`, `OnboardOSSmokeRole`, both log groups, default stage | **Unchanged** (the smoke artifact is byte-for-byte the same size as before) |
+| Removed resources | None |
+
+### API role permissions (the only IAM change)
+
+| Statement | Before (Phase 2A) | After (Phase 2B) | Used by |
+|---|---|---|---|
+| Core table items | `GetItem` | `GetItem`, `PutItem`, `UpdateItem` | membership/assignment/session reads; create assignment; session + assignment writes |
+| Core table + `GSI1` + `GSI2` | none | `Query` | member directory (single partition); employee list (`GSI1`); manager list (`GSI2`) |
+| Events table | none | `PutItem` only | append-only event history |
+| Not granted | | `Scan`, `DeleteItem`, `Batch*`, `ConditionCheckItem`, any Events read/update/delete, wildcard indexes | |
+
+`TransactWriteItems` has no IAM action of its own; it is authorized by the per-item `PutItem`/`UpdateItem`
+above on each table written. Index permissions name `GSI1` and `GSI2` exactly (no `/index/*`).
+
+### Deploy procedure
+
+Use the same reviewed-change-set procedure as Phase 2A ("Pre-deploy gate", above), with the same command and
+parameters you used to deploy Phase 2A (check the stack's current parameter values first; a deploy without
+them applies template defaults). Expected change-set:
+
+- `Add`: the six `OnboardOSApiFunctionApi*Permission` resources.
+- `Modify`, `Replacement: False`: `OnboardOSApiFunction`, `OnboardOSApiRole`, `OnboardOSHttpApi`.
+- **STOP** if anything Cognito (`OnboardOSUserPool`, `OnboardOSSpaClient`, `OnboardOSUserPoolDomain`,
+  `OnboardOSManagedLoginBranding`), either table, or the smoke function appears at all, or if any `Remove`
+  or any `Replacement` of `True`/`Conditional` appears.
+
+No new Workshop permission is needed beyond what Phase 2A already exercised for the Lambda, IAM role and
+HTTP API updates. No Cognito API is called by this change.
+
+### Seed data requirement
+
+Manager scope uses `teamIds`. `scripts/seed-demo.ts` writes `cloud-team-1` for the demo manager and employee,
+so the demo works as seeded. A membership with a missing or malformed `teamIds` is treated as invalid and
+**fails closed** (a manager with no teams can assign nobody).
+
+### Live verification (NOT RUN: execute after deployment, in this order)
+
+Use real sign-ins for the three demo identities; keep tokens in local shell variables and never paste them
+anywhere. `API` = the `ApiUrl` output; `ORG` = `northstar-cloud`.
+
+| # | As | Action | Expected |
+|---|---|---|---|
+| 1 | manager | open the app | manager screen; employee dropdown lists only team employees |
+| 2 | manager | Assign INC-104 | success; row appears as **Assigned** |
+| 3 | manager | click Assign again / reload and re-assign | "already assigned"; **one** row (idempotent) |
+| 4 | employee (separate browser profile) | open the app | the INC-104 assignment is listed |
+| 5 | employee | Start investigation | session page; ticket/runbook/diagnostics open; diagnostics labelled **Synthetic** |
+| 6 | employee | refresh the session page | same state and `viewed` flags (read back from the server) |
+| 7 | employee | go back and press Resume | same session id; no second session |
+| 8 | manager | refresh | assignment shows **In progress** |
+| 9 | admin | open the app | the existing identity screen only |
+| 10 | curl, employee token | `GET $API/v1/orgs/$ORG/assignable-employees` | `403` |
+| 11 | curl, manager token | `GET $API/v1/sessions/<employee's session id>` | `404` (manager preview is not part of this slice) |
+| 12 | curl, no token | any `/v1/*` route | `401` from API Gateway |
+| 13 | curl, employee token | `POST .../actions` with a stale `expectedStateVersion` | `409` |
+| 14 | curl, manager token | `POST .../assignments` with an extra `"role":"org_admin"` field | `400` |
+
+Read-only data checks (the deployment owner, after step 5; table names from the stack outputs):
+
+```bash
+aws dynamodb query --table-name <EventsTableName> --region us-east-1 \
+  --key-condition-expression "PK = :p" --expression-attribute-values '{":p":{"S":"SESSION#<sessionId>"}}' \
+  --query "Items[].[SK.S,type.S,stateVersion.N]" --output table
+# Expect SEQ#0000000001 INVESTIGATION_STARTED, then one row per item opened, contiguous.
+```
+
+### Known limitations (Phase 2B)
+
+| # | Limitation | Impact |
+|---|---|---|
+| 1 | Assignment lists read `GSI1`/`GSI2`, which are eventually consistent | a just-created assignment can be absent from an immediate re-read; the manager screen merges the server's own create response, and Refresh converges |
+| 2 | Managers/admins list only assignments they created | there is no org-wide view; a second manager does not see the first's assignments |
+| 3 | One assignment per (organization, scenario version, employee) | re-assigning returns the existing one; a new attempt arrives with revisions/review |
+| 4 | Manager read-only session preview is not implemented | managers get `404` on a session; deliberate, listed in the architecture freeze for a later slice |
+| 5 | No pagination | assignment lists cap at 50 and the member directory at 100 (the demo has three members) |
+| 6 | Events are written but have no read API | the timeline view arrives with the review slice; verify through DynamoDB |
+| 7 | No config editing, test runs or submission | `SAVE_CONFIG`, tests and reports are rejected as unknown actions; the next slice adds them |
+| 8 | `GSI2` partition reuse | the manager partition holds `ASSIGN#...` entries now; the frozen design's `REVIEWABLE#...` entries will share it later (see ADR-016) |
+| 9 | All behaviour is verified only against an in-memory DynamoDB and the real handler code | real DynamoDB, the JWT authorizer and the deployed UI are unverified until the table above is executed |
+
+### Rollback
+
+Phase 2B is additive: it changes IAM, routes and code, not data or identity. To roll back, redeploy the
+previous (Phase 2A) template through the same change-set gate; this removes the six routes, their
+permissions and the extra IAM, and leaves Cognito and both tables as they are. Assignments, sessions and
+events already written stay in the tables (harmless; ignored by Phase 2A code). `sam delete` is not a
+rollback: it deletes the tables.

@@ -2,7 +2,7 @@
   "name": "@onboardos/api",
   "version": "0.1.0",
   "private": true,
-  "description": "OnboardOS API Lambda — HTTP handler and internal smoke-test handler",
+  "description": "OnboardOS API Lambda \u2014 HTTP handler and internal smoke-test handler",
   "scripts": {
     "test": "vitest run --reporter=verbose"
   },
@@ -10,6 +10,8 @@
     "@aws-sdk/client-dynamodb": "3.1164.0",
     "@aws-sdk/lib-dynamodb": "3.1164.0",
     "@onboardos/contracts": "*",
+    "@onboardos/scenario-engine": "*",
+    "@onboardos/scenario-fixtures": "*",
     "esbuild": "0.28.2",
     "zod": "4.6.7"
   },
