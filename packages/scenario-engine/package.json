@@ -1,0 +1,11 @@
+{
+  "name": "@onboardos/scenario-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure deterministic scenario engine. No I/O, no AWS, no clock, no randomness: everything it needs is passed in.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "dependencies": {
+    "@onboardos/contracts": "*"
+  }
+}

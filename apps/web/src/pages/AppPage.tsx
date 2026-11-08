@@ -3,6 +3,9 @@ import { useNavigate } from "react-router-dom";
 import type { MeResponse, OrgRole } from "@onboardos/contracts";
 import { ApiError, getMe } from "../lib/api.js";
 import { getSession, logout } from "../lib/auth.js";
+import { viewForRole } from "../lib/views.js";
+import { EmployeeView } from "../views/EmployeeView.js";
+import { ManagerView } from "../views/ManagerView.js";
 
 function roleBadgeClass(role: OrgRole): string {
   switch (role) {
@@ -91,8 +94,13 @@ export function AppPage() {
 
   if (!me) return null;
 
+  // The server's answer picks the screen; it grants nothing. Every request a screen
+  // makes is re-authorized by the backend from the verified token and DynamoDB.
+  const primary = me.memberships[0];
+  const view = primary ? viewForRole(primary.role) : "identity";
+
   return (
-    <div className="container">
+    <div className={view === "identity" ? "container" : "container-wide"}>
       <div className="card">
         <div className="row">
           <h1>OnboardOS</h1>
@@ -130,10 +138,12 @@ export function AppPage() {
         )}
 
         <p style={{ fontSize: ".8rem", color: "#94a3b8", marginTop: "1rem" }}>
-          Phase 2A — authentication and membership foundation.
-          Full onboarding workspace available after Phase 3.
+          Your role is determined by the server and cannot be changed from this page.
         </p>
       </div>
+
+      {primary && view === "manager" && <ManagerView orgId={primary.organizationId} />}
+      {primary && view === "employee" && <EmployeeView orgId={primary.organizationId} />}
     </div>
   );
 }

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "paths": {
+      "@onboardos/contracts": ["../contracts/src/index.ts"]
+    }
+  },
+  "references": [{ "path": "../contracts" }],
+  "include": ["src/**/*"]
+}

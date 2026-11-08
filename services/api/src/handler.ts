@@ -1,48 +1,47 @@
 /**
- * OnboardOS API Lambda — HTTP routing handler.
+ * OnboardOS API Lambda -- HTTP routing handler.
  *
- * Public routes  (no JWT authorizer):
- *   GET /health          → Phase 1 health check
+ * Public routes (no JWT authorizer):
+ *   GET  /health
  *
- * Protected routes (API Gateway JWT authorizer required):
- *   GET /v1/me           → authenticated identity + memberships
+ * Protected routes (API Gateway JWT authorizer required; the Lambda then
+ * authorizes against DynamoDB membership -- see authz.ts):
+ *   GET  /v1/me
+ *   GET  /v1/orgs/{orgId}/assignable-employees
+ *   GET  /v1/orgs/{orgId}/assignments
+ *   POST /v1/orgs/{orgId}/assignments
+ *   POST /v1/assignments/{assignmentId}/start
+ *   GET  /v1/sessions/{sessionId}
+ *   POST /v1/sessions/{sessionId}/actions
  *
- * Route protection is enforced at the API Gateway level via a JWT authorizer.
- * Requests that do not carry a valid Cognito access token never reach this
- * Lambda for protected routes.
- *
- * The smoke-test handler lives in smokeTest.ts.
- * It is NOT wired to any API Gateway event source.
+ * Route keys are API Gateway's templated keys, matched exactly. Anything else
+ * is a 404. The smoke-test handler lives in smokeTest.ts and is NOT wired to
+ * any API Gateway event source.
  */
 
 import type { APIGatewayProxyEventV2, Context } from "aws-lambda";
+import { defaultDeps, type ApiDeps } from "./deps.js";
+import { errorResult, HttpError, json, type HttpResult } from "./http.js";
+import {
+  handleCreateAssignment,
+  handleListAssignableEmployees,
+  handleListAssignments,
+} from "./routes/assignments.js";
 import { handleGetMe } from "./routes/me.js";
+import {
+  handleGetSession,
+  handleSessionAction,
+  handleStartAssignment,
+} from "./routes/sessions.js";
 
-// ---------------------------------------------------------------------------
-// Response type (always the structured object form)
-// ---------------------------------------------------------------------------
-
-interface HttpResult {
-  statusCode: number;
-  headers: Record<string, string>;
-  body: string;
-}
-
-function json(statusCode: number, body: unknown): HttpResult {
-  return {
-    statusCode,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Public HTTP handler
-// ---------------------------------------------------------------------------
-
-export const httpHandler = async (
+/**
+ * Route + dispatch with injectable dependencies. `getDeps` is lazy so that
+ * /health keeps working even if table configuration is wrong.
+ */
+export const handleRequest = async (
   event: APIGatewayProxyEventV2,
   context: Context,
+  getDeps: () => ApiDeps,
 ): Promise<HttpResult> => {
   try {
     const routeKey =
@@ -50,7 +49,7 @@ export const httpHandler = async (
       `${event.requestContext?.http?.method} ${event.requestContext?.http?.path}`;
 
     switch (routeKey) {
-      // ── Public routes ──────────────────────────────────────────────────
+      // -- Public --------------------------------------------------------------
       case "GET /health":
         return json(200, {
           status: "ok",
@@ -58,11 +57,26 @@ export const httpHandler = async (
           timestamp: new Date().toISOString(),
         });
 
-      // ── Protected routes (JWT authorizer applied at API GW level) ──────
+      // -- Phase 2A ------------------------------------------------------------
       case "GET /v1/me":
-        return handleGetMe(event, context);
+        return await handleGetMe(event, context);
 
-      // ── Fallthrough ────────────────────────────────────────────────────
+      // -- Phase 2B: assignment ------------------------------------------------
+      case "GET /v1/orgs/{orgId}/assignable-employees":
+        return await handleListAssignableEmployees(event, getDeps());
+      case "GET /v1/orgs/{orgId}/assignments":
+        return await handleListAssignments(event, getDeps());
+      case "POST /v1/orgs/{orgId}/assignments":
+        return await handleCreateAssignment(event, getDeps());
+
+      // -- Phase 2B: workplace session ------------------------------------------
+      case "POST /v1/assignments/{assignmentId}/start":
+        return await handleStartAssignment(event, getDeps());
+      case "GET /v1/sessions/{sessionId}":
+        return await handleGetSession(event, getDeps());
+      case "POST /v1/sessions/{sessionId}/actions":
+        return await handleSessionAction(event, getDeps());
+
       default:
         return json(404, {
           code: "NOT_FOUND",
@@ -71,6 +85,10 @@ export const httpHandler = async (
         });
     }
   } catch (err: unknown) {
+    if (err instanceof HttpError) {
+      return errorResult(err, context.awsRequestId);
+    }
+    // Never leak internals to the client; the detail stays in the logs.
     console.error({ requestId: context.awsRequestId, error: String(err) });
     return json(500, {
       code: "INTERNAL_ERROR",
@@ -79,3 +97,6 @@ export const httpHandler = async (
     });
   }
 };
+
+export const httpHandler = (event: APIGatewayProxyEventV2, context: Context): Promise<HttpResult> =>
+  handleRequest(event, context, defaultDeps);

@@ -1,7 +1,17 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/contracts" },
-    { "path": "./services/api" }
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./packages/scenario-engine"
+    },
+    {
+      "path": "./packages/scenario-fixtures"
+    },
+    {
+      "path": "./services/api"
+    }
   ]
 }

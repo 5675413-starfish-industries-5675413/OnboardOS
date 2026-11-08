@@ -4,11 +4,17 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
-      // Resolve the workspace contracts package from SOURCE. Its package.json
+      // Resolve workspace packages from SOURCE. Its package.json
       // "main" points at dist/, which only exists after `tsc --build`; without
-      // this alias `npm test` fails on a fresh clone until a build has run.
+      // these aliases `npm test` fails on a fresh clone until a build has run.
       "@onboardos/contracts": fileURLToPath(
         new URL("./packages/contracts/src/index.ts", import.meta.url),
+      ),
+      "@onboardos/scenario-engine": fileURLToPath(
+        new URL("./packages/scenario-engine/src/index.ts", import.meta.url),
+      ),
+      "@onboardos/scenario-fixtures": fileURLToPath(
+        new URL("./packages/scenario-fixtures/src/index.ts", import.meta.url),
       ),
     },
   },

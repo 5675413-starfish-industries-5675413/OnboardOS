@@ -6,11 +6,29 @@
     "composite": true,
     "tsBuildInfoFile": "dist/.tsbuildinfo",
     "paths": {
-      "@onboardos/contracts": ["../../packages/contracts/src/index.ts"]
+      "@onboardos/contracts": [
+        "../../packages/contracts/src/index.ts"
+      ],
+      "@onboardos/scenario-engine": [
+        "../../packages/scenario-engine/src/index.ts"
+      ],
+      "@onboardos/scenario-fixtures": [
+        "../../packages/scenario-fixtures/src/index.ts"
+      ]
     }
   },
   "references": [
-    { "path": "../../packages/contracts" }
+    {
+      "path": "../../packages/contracts"
+    },
+    {
+      "path": "../../packages/scenario-engine"
+    },
+    {
+      "path": "../../packages/scenario-fixtures"
+    }
   ],
-  "include": ["src/**/*"]
+  "include": [
+    "src/**/*"
+  ]
 }

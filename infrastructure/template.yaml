@@ -182,7 +182,7 @@ Resources:
     Type: AWS::Serverless::HttpApi
     Properties:
       StageName: "$default"
-      Description: OnboardOS HTTP API - Phase 2A
+      Description: OnboardOS HTTP API - Phase 2B
       Auth:
         # Default authorizer for all routes that declare Auth: JwtAuthorizer
         Authorizers:
@@ -199,6 +199,7 @@ Resources:
           - "http://localhost:5173"
         AllowMethods:
           - GET
+          - POST
           - OPTIONS
         AllowHeaders:
           - Content-Type
@@ -210,7 +211,7 @@ Resources:
   OnboardOSApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      Description: OnboardOS API - HTTP routing handler (Phase 2A)
+      Description: OnboardOS API - HTTP routing handler (Phase 2B)
       Handler: handler.httpHandler
       CodeUri: ../services/api/
       Role: !GetAtt OnboardOSApiRole.Arn
@@ -234,6 +235,56 @@ Resources:
             ApiId: !Ref OnboardOSHttpApi
             Path: /v1/me
             Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        # Phase 2B routes: ALL protected by the JWT authorizer; the Lambda then authorizes
+        # against DynamoDB membership/ownership. There is no other public route than /health.
+        ApiListAssignableEmployees:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/assignable-employees
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiListAssignments:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/assignments
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiCreateAssignment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/assignments
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiStartAssignment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/assignments/{assignmentId}/start
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetSession:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiSessionAction:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/actions
+            Method: POST
             Auth:
               Authorizer: JwtAuthorizer
     Metadata:
@@ -273,13 +324,13 @@ Resources:
         External: []
 
   # ── IAM: API execution role ───────────────────────────────────────────────
-  # Phase 2A adds DynamoDB GetItem on the Core table for membership lookups.
-  # No write, no scan, no Events table access.
+  # Phase 2B: item access + bounded queries on Core, append-only PutItem on Events.
+  # No Scan, no Delete, no Batch, no Events reads. See each statement below.
 
   OnboardOSApiRole:
     Type: AWS::IAM::Role
     Properties:
-      Description: Execution role for OnboardOS API Lambda (Phase 2A)
+      Description: Execution role for OnboardOS API Lambda (Phase 2B)
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -304,14 +355,36 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: AllowMembershipRead
+              # Item access on the Core table: memberships (read), assignments and
+              # sessions (create/replace/update). TransactWriteItems has no IAM action of
+              # its own; it is authorized by the per-item actions here on each table written.
+              # DeleteItem and BatchWriteItem are deliberately NOT granted.
+              - Sid: CoreItemAccess
                 Effect: Allow
                 Action:
-                  # GetItem: load specific membership and org profile records
                   - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
                 Resource:
                   - !GetAtt OnboardOSCoreTable.Arn
-                  # No index access — membership lookup uses primary key directly
+              # Bounded queries only: the single-partition member listing (table) and the
+              # assignment lists (GSI1 employee, GSI2 manager). Scan is NOT granted.
+              - Sid: CoreQuery
+                Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt OnboardOSCoreTable.Arn
+                  - !Sub "${OnboardOSCoreTable.Arn}/index/GSI1"
+                  - !Sub "${OnboardOSCoreTable.Arn}/index/GSI2"
+              # Append-only event history: the API can create events but never read,
+              # modify or delete them.
+              - Sid: EventsAppend
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource:
+                  - !GetAtt OnboardOSEventsTable.Arn
 
   # ── IAM: Smoke-test execution role ────────────────────────────────────────
   # Unchanged from Phase 1.
