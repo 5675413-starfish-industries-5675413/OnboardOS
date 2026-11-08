@@ -1119,3 +1119,165 @@ Read-only data check (after step 2): `aws dynamodb query --table-name <CoreTable
 
 Redeploy the Phase 2C template through the same gate: removes the three routes/permissions and `EventsRead`. Submissions, decisions, ledger entries and the extra state fields stay in the Core table, ignored by Phase 2C code
 (which cannot write `SUBMITTED` sessions or read these items). An assignment left in `AWAITING_REVIEW`/`APPROVED`/`REVISION_REQUESTED` would be shown by the older UI as its raw status and could not be started. `sam delete` is not a rollback: it deletes the tables.
+
+---
+
+## Phase 4: AI coworker on Amazon Bedrock
+
+**Status: built and verified LOCALLY only. Not committed, not deployed, NOT verified end-to-end on AWS.** The only real Bedrock call made in this project
+so far is the Phase 0 smoke test (`amazon.nova-micro-v1:0`, `us-east-1`, Converse, as the Workshop participant role: reply `ready`, 7 input / 2 output tokens,
+`end_turn`, 228 ms). It did **not** run as the API Lambda's role. Every automated test uses a fake provider; none of them proves a deployed call.
+
+An employee asks the coworker about the incident they were assigned, gets a Bedrock-written answer, and finds the same conversation after a refresh.
+The coworker is **advisory text**: it has no tools and cannot run tests, edit configuration, submit, approve or change anything.
+
+### Routes (JWT-protected; session ownership re-checked on every call)
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /v1/sessions/{sessionId}/messages` | none | `{ turns[], coworker{ enabled, canSend, reason, modelId, completedTurns, attemptsUsed, limits } }`. Also closes an abandoned reservation. Readable after submission. |
+| `POST /v1/sessions/{sessionId}/messages` | header `Idempotency-Key` (8-64 of `A-Za-z0-9_-`); `{ "message": "<1-600 chars>" }` (strict) | `201 { turn, coworker, created:true }`; `200 ... created:false` for an identical retry; the turn is `COMPLETE`, or `ERROR` with a fixed message when the provider failed. |
+
+Errors: `400` shape/length/forged field; `404` not your session (opaque, same for every non-owner); `409 COWORKER_BUSY` (one in flight), `409 IDEMPOTENCY_CONFLICT`
+(same key, different text), `409 SESSION_NOT_OPEN` (attempt submitted); `429 COWORKER_LIMIT_REACHED`; `503 AI_UNAVAILABLE` (no model configured).
+The request cannot carry a model, role, organization, prompt, session status, test result or credentials: any extra field is a `400`.
+A turn exposes only `turnId, status, userText, reply, truncated, modelId, createdAt, completedAt, errorCode, errorMessage`. Token counts, the Bedrock request id, stop reason and
+latency are stored on the turn for audit and **never** returned to the browser.
+
+### What the model is told (`coworkerContext.ts`, pure)
+
+Built on the server, after `loadOwnedSession`, from records the server loaded: the employee-visible scenario (ticket, runbook, **synthetic** diagnostics, labelled as such), which items were
+opened, the current saved configuration, the newest finished test result **for the current configuration** (the same neutral case names and PASS/FAIL the employee already sees), and the last 6 completed
+turns. It is handed no suite id, thresholds, rubric, manager decision, subject id, email, other user's data or credentials: the function has no parameter that could carry them.
+Employee text and scenario text are fenced as data, fence characters are neutralized, and the instructions say the data is not instructions. Prompt version `coworker-v1` is stored on every turn.
+The model may explain and ask questions; it is told it cannot run or predict tests, act in AWS, or see hidden material.
+
+### Persistence and the one-paid-call rule (Core table; no new table)
+
+| Key (all under `SESSION#<id>`) | Item |
+|---|---|
+| `CHAT#CTL` | control: revision `ctlRev`, lock holder `ctlActive`, `ctlLease`, `ctlAttempts`, `ctlCompleted` |
+| `CHAT#MSG#turn_<13-digit ms>_<12 hex>` | one turn (opaque, sortable by creation time) |
+| `CHAT#IDEM#<key>` | idempotency ledger: request hash + turn id |
+
+These cannot collide with `STATE`, `CONFIG#`, `TEST#`, `IDEM#SUBMIT#`, events or submissions (a test asserts it).
+A reservation is ONE `TransactWriteItems`: `ConditionCheck` on `STATE` (still `INVESTIGATING` and still this employee's) + the control item moved to the new holder with incremented
+counters, **conditional on the revision just read** (or on not existing, the first time) + closing a previous holder's expired turn as `STRANDED` + the new `PENDING` turn
+(create-only) + the ledger entry (create-only). Only the request whose transaction commits calls Bedrock, once, outside the transaction (`maxAttempts: 1`, 20 s abort). Completion is a second conditional
+transaction: the turn must still be `PENDING` and the lock must still belong to this turn, so a late result after a takeover is discarded and cannot overwrite the closed turn or free someone else's lock.
+
+* Limits: 600 characters per message, 20 successful turns, 30 total attempts (errors count), one in flight, 6 turns of history, 400 output tokens, reply capped at 2000 characters.
+* Same key + same text returns the stored turn with **no** new model call (also while it is `PENDING`, and for an `ERROR` turn). Same key + different text is `409`. A deliberate retry after an error uses a **new** key.
+* A reservation not finished within 60 s is closed as `STRANDED` by the next read or question.
+* Chat is **not** scenario state: it never writes `STATE`, never changes `stateVersion`, writes no Events, and is unaffected by the 200-action cap. New messages are accepted only while the attempt is `INVESTIGATING`; history stays readable after submission.
+
+**Not guaranteed:** exactly-once billing. If Bedrock accepts and processes a request but the connection drops before we hear back, the service may have billed a call that we record as `ERROR`; the user then asks again with a new key.
+If the answer cannot be stored after a successful call, the turn stays `PENDING` until the lease closes it as `STRANDED` and that answer is lost (not shown, not invented).
+
+**Consequence for evidence:** frozen submissions do not include chat and are unchanged. A later phase can add an optional field to *new* submissions (counts, model id, first/last time, a digest of the ordered turns, not the text); old submissions
+would read "not recorded", never "none" (ADR-038).
+
+### Infrastructure changes (additive; the coworker is OFF by default)
+
+| Change | Detail |
+|---|---|
+| Parameter `CoworkerModelId` | default `""`; `AllowedValues`: `""` or `amazon.nova-micro-v1:0` only |
+| Condition `HasCoworkerModel` | parameter is not empty |
+| API function env | `ONBOARDOS_COWORKER_MODEL_ID: !Ref CoworkerModelId` |
+| Routes | `GET` and `POST /v1/sessions/{sessionId}/messages`, both behind the JWT authorizer (CORS already allows `Idempotency-Key`) |
+| API role policy `OnboardOSApiCoworker` | **only when the parameter is non-empty** (`Fn::If` ... `AWS::NoValue`): `bedrock:InvokeModel` on `arn:aws:bedrock:${AWS::Region}::foundation-model/${CoworkerModelId}` (one action, one resource) and `dynamodb:ConditionCheckItem` on the Core table ARN |
+| Unchanged | the three existing API role policies (verified byte-identical in the translated output), both tables, Cognito, the runner function and role, the smoke function, the Outputs, the Vercel configuration |
+
+`dynamodb:ConditionCheckItem` is the one grant that is not Bedrock: `TransactWriteItems` authorizes a `ConditionCheck` by that action, and the reservation uses one on `STATE` so it can verify the session is still open without writing it.
+It is created only with the coworker policy, and a template test asserts it appears once, on the Core table. If it were missing the symptom would be `500` on every `POST` (the first thing to look for in the live check).
+
+CloudFormation diff against `main` (SAM translator; **not** a change set, so replacement behaviour is unverified): **Added** `OnboardOSApiFunctionApi{ListCoworkerMessages,SendCoworkerMessage}Permission`;
+**Modified in place** `OnboardOSApiFunction` (one environment variable), `OnboardOSApiRole` (one conditional policy), `OnboardOSHttpApi` (OpenAPI body: one path with GET and POST); no resource removed; Outputs unchanged.
+
+### Deployment commands (PREPARED, NOT EXECUTED)
+
+Deploy in two steps so infrastructure and behaviour change separately. Use the same stack, region and parameters as the last deployment (check `aws cloudformation describe-stacks --stack-name onboardos-dev --query 'Stacks[0].Parameters'` first and pass those values explicitly).
+
+```bash
+# 0. Local gate on the exact commit being deployed
+npm ci && npm run verify
+sam validate --template-file infrastructure/template.yaml --lint
+
+# 1. Build, then create a change set WITHOUT executing it (coworker stays OFF: CoworkerModelId="")
+sam build --template-file infrastructure/template.yaml --build-in-source
+sam deploy --stack-name onboardos-dev --region us-east-1 --resolve-s3 --capabilities CAPABILITY_IAM \
+  --no-execute-changeset --no-confirm-changeset --no-fail-on-empty-changeset \
+  --parameter-overrides LogRetentionDays=<current> DemoOrgId=<current> CoworkerModelId=""   # add the other current parameter values
+
+# 2. Review the change set (see "Expected change set"), then, only after approval:
+aws cloudformation describe-change-set --stack-name onboardos-dev --region us-east-1 --change-set-name <name> \
+  --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' --output table
+aws cloudformation execute-change-set --stack-name onboardos-dev --region us-east-1 --change-set-name <name>
+
+# 3. Turn the coworker ON as a second, separate change set (adds the Bedrock policy), reviewed the same way
+sam deploy ... --no-execute-changeset ... --parameter-overrides ... CoworkerModelId="amazon.nova-micro-v1:0"
+```
+
+**Expected change set, step 1 (feature OFF):** `Add` `OnboardOSApiFunctionApiListCoworkerMessagesPermission` and `OnboardOSApiFunctionApiSendCoworkerMessagePermission`;
+`Modify`, `Replacement: False`: `OnboardOSApiFunction`, `OnboardOSHttpApi`, and `OnboardOSApiRole` **only if CloudFormation counts the removed-by-condition policy as a change** (with the feature off the role's policies are identical to today).
+**Step 3 (feature ON):** `Modify`, `Replacement: False`: `OnboardOSApiFunction` (env value), `OnboardOSApiRole` (adds `OnboardOSApiCoworker`).
+**STOP** if the change set shows any `Remove`, any `Replacement` of `True`/`Conditional`, or touches either table, Cognito, the runner function or role, or the smoke function. Roles are unnamed, so `CAPABILITY_IAM` is sufficient.
+Do not run `sam deploy` without `--no-execute-changeset` for this change.
+
+### Live verification (NOT RUN; every row must pass before calling this verified on AWS)
+
+| # | As | Action | Expected |
+|---|---|---|---|
+| 1 | employee | open a session with the stack deployed but the coworker OFF | panel says the AI coworker is not available; the input is disabled; nothing simulated |
+| 2 | operator | step 3 (ON). Employee reloads | panel shows `amazon.nova-micro-v1:0` and is enabled |
+| 3 | employee | ask "What should I check first?" | an answer within a few seconds, labelled "AI coworker · amazon.nova-micro-v1:0" (this is the first proof that the **API Lambda's role** can invoke the model) |
+| 4 | operator | CloudWatch, API log group | one `coworker_turn` line with `status:"COMPLETE"`, a Bedrock `requestId`, token counts, **no** question or answer text |
+| 5 | employee | refresh the page | same conversation |
+| 6 | employee | ask while the previous answer is pending (two tabs) | the second gets "still answering" (409); only one `coworker_turn` line |
+| 7 | employee | repeat a request with the same `Idempotency-Key` (DevTools) | `200`, `created:false`, no new log line |
+| 8 | employee | Save config, run tests, then ask "did my change work?" | the answer is consistent with the shown test result and does not claim to have run anything |
+| 9 | employee | submit the report, then reopen the session | history visible, input disabled with the read-only reason; `POST` returns `409` |
+| 10 | curl, another employee / manager / admin | `GET`/`POST .../messages` on that session | `404` |
+| 11 | curl, no token | the same | `401` from API Gateway |
+| 12 | operator | set `CoworkerModelId=""` again | panel returns to unavailable; history still readable |
+| 13 | browser | the existing workflow: assign, investigate, save, run tests, submit, review | unchanged |
+
+If row 3 returns an `ERROR` turn, read the stored `errorCode` / the log's error name: `AI_UNAVAILABLE` points at IAM (`bedrock:InvokeModel`), the model id, or an SCP; the `500` described above points at `ConditionCheckItem`.
+
+### Known limitations (Phase 4)
+
+| # | Limitation | Impact |
+|---|---|---|
+| 1 | **No deployed check has run** | the Lambda role's Bedrock permission, `ConditionCheckItem`, the empty-string environment variable and the UI are untested on AWS |
+| 2 | Billing is at-least-once under network ambiguity | see above; capped at 30 attempts per session |
+| 3 | Synchronous: the POST waits for the model (up to 20 s) | a slow model means a slow request; the page shows a waiting state and polls if the response is lost |
+| 4 | No streaming | the answer appears whole |
+| 5 | A completed answer that cannot be stored is lost | the turn closes as `STRANDED` after 60 s |
+| 6 | Model answers can be wrong | the panel says so; they never feed evidence or decisions |
+| 7 | Chat is not in the frozen evidence | managers cannot see it (deliberate; ADR-038) |
+| 8 | The React panel has no DOM-level tests | request shapes, rules and the rendering of a turn (server-rendered, so escaping is checked) are tested; **manual browser verification matters** |
+| 9 | One model, one prompt version, English only | `coworker-v1` |
+| 10 | Local tooling: the SAM build step removes `@types/aws-lambda` from `node_modules`, so a second consecutive `npm run verify` needs `npm ci` | unaffected CI / fresh clone |
+
+### Rollback
+
+Fastest: redeploy with `CoworkerModelId=""` (removes the Bedrock policy; the API then answers `503 AI_UNAVAILABLE` and the panel says so). Full: redeploy the previous template through the same gate (removes the two routes and permissions).
+Stored `CHAT#` items are ignored by older code and harmless. `sam delete` is not a rollback: it deletes the tables.
+
+### Release coordination: frontend and backend deploy separately (Phase 4)
+
+* **Vercel** builds the SPA from Git (`vercel.json` only adds an SPA rewrite). **SAM** deploys the API and is run by hand. Merging this branch to `main` therefore ships the new web code to production *before* the two `/messages` routes exist.
+* The panel is behind **`VITE_COWORKER_ENABLED`** (build-time, default OFF; only the value `true`, any case, enables it). With it unset the merged frontend renders no coworker UI and makes no `/messages` request, so a merge that runs ahead of the stack is harmless. Nothing else in this branch changes how the web app talks to the existing API (`SessionView` and every existing request are unchanged).
+* **Order:** (1) merge to `main` (frontend deploys, panel hidden); (2) deploy the stack with `CoworkerModelId=""` and verify the existing workflow; (3) deploy again with `CoworkerModelId="amazon.nova-micro-v1:0"` and verify `GET`/`POST` with a token; (4) set `VITE_COWORKER_ENABLED=true` in Vercel and redeploy the frontend; (5) run the live checks below. The reverse order of (3) and (4) would show a panel reporting "not available" (harmless, honest) or, before (2), failing requests.
+* Rollback in either direction is independent: unset the Vercel variable and redeploy to hide the panel; set `CoworkerModelId=""` to turn the backend off.
+
+### Release audit notes (Phase 4)
+
+| Area | Finding |
+|---|---|
+| Reservation atomicity, IAM | One `TransactWriteItems` (ConditionCheck on `STATE` + control item at a read revision + turn + ledger [+ stranded close]); no two actions target one item (AWS forbids ConditionCheck and Update on the same item). The `ConditionCheck` is authorized by `dynamodb:ConditionCheckItem`, which the conditional policy grants on the Core table only. No code path needs it when the coworker is disabled (POST answers `503` before any transaction; GET and stranded reconciliation use only `UpdateItem`). |
+| Concurrency | Same key and different keys, five-way races, takeover races, quota races and late completions are covered by tests; the fake DynamoDB now also rejects unused expression placeholders, as real DynamoDB does. **The fake proves the logic, not AWS behaviour:** the first deployed run is the real check. |
+| Submit while an answer is pending | Allowed: chat holds no lock on scenario state. The answer is recorded, the frozen submission and `STATE` are untouched, and later messages get `409 SESSION_NOT_OPEN`. **Defect found and fixed:** the POST response used the phase read *before* the model call, so it could report `canSend: true` after a mid-answer submission; it now reads the phase when responding. |
+| Timeouts | Bedrock abort 20 s, SDK request timeout 20 s, Lambda 29 s (inherited), API Gateway 30 s, lease 60 s. The Bedrock SDK client uses an HTTP/2 handler: the timeout is verified on the resolved handler configuration, `connectionTimeout` (an HTTP/1 option that would be ignored) was removed and the SDK default `disableConcurrentStreams` restated. A connection reused after a Lambda freeze could fail its first call; that is recorded as an `ERROR` turn and the user asks again (no automatic retry by design). |
+| Isolation | Ledger, control and turns are keyed by session; every read re-parses and re-checks `sessionId`; the model input has no parameter for another user's data. |
+| Frontend | No SDK, model id, prompt or suite text in the browser source or the built bundle (tests and a bundle scan). |

@@ -94,6 +94,22 @@ interface TxOp {
   condition?: string;
   input: ExprInput;
   apply: (current: Item | undefined) => Item;
+  /** ConditionCheck: evaluated, never written. */
+  noWrite?: boolean;
+}
+
+/**
+ * Real DynamoDB rejects an expression that supplies a placeholder it does not use. A lenient fake would
+ * hide that class of bug until deployment, so reject it here too.
+ */
+function assertPlaceholdersUsed(input: ExprInput & { ConditionExpression?: string; UpdateExpression?: string }): void {
+  const text = `${input.ConditionExpression ?? ""} ${input.UpdateExpression ?? ""}`;
+  for (const k of Object.keys(input.ExpressionAttributeValues ?? {})) {
+    if (!text.includes(k)) throw namedError("ValidationException", `Value provided in ExpressionAttributeValues unused in expressions: keys: {${k}}`);
+  }
+  for (const k of Object.keys(input.ExpressionAttributeNames ?? {})) {
+    if (!text.includes(k)) throw namedError("ValidationException", `Value provided in ExpressionAttributeNames unused in expressions: keys: {${k}}`);
+  }
 }
 
 export class FakeDynamo {
@@ -214,6 +230,13 @@ export class FakeDynamo {
           apply: () => structuredClone(p.Item),
         };
       }
+      if (t["ConditionCheck"]) {
+        const c = t["ConditionCheck"];
+        return {
+          table: c.TableName, key: c.Key, condition: c.ConditionExpression, input: c,
+          apply: (cur) => cur ?? { ...c.Key }, noWrite: true,
+        };
+      }
       if (t["Update"]) {
         const u = t["Update"];
         return {
@@ -230,6 +253,7 @@ export class FakeDynamo {
       throw namedError("ValidationException", "Transaction request cannot include multiple operations on one item");
     }
     ops.forEach((o) => assertNoUndefined(o.key));
+    ops.forEach((o) => assertPlaceholdersUsed(o.input as never));
 
     this.beforeTransact?.(ops.map((o) => ({ table: o.table, key: o.key })));
 
@@ -239,7 +263,10 @@ export class FakeDynamo {
       e.CancellationReasons = results.map((r) => ({ Code: r ? "None" : "ConditionalCheckFailed" }));
       throw e;
     }
-    for (const o of ops) this.put(o.table, o.apply(this.get(o.table, o.key)));
+    for (const o of ops) {
+      if (o.noWrite) continue;
+      this.put(o.table, o.apply(this.get(o.table, o.key)));
+    }
     return {};
   }
 }

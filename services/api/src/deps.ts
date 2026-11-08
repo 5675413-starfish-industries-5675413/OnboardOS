@@ -6,6 +6,8 @@
  */
 
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { randomBytes } from "node:crypto";
+import { bedrockProviderFromEnv, type BedrockProvider } from "./bedrock.js";
 import { docClient } from "./db.js";
 import { lambdaRunnerFromEnv, type RunnerClient } from "./runner.js";
 
@@ -25,6 +27,13 @@ export interface ApiDeps {
    * then fails fast and leaves nothing stranded).
    */
   runner: () => RunnerClient;
+  /**
+   * The AI coworker's model provider, or null when no model is configured (the feature is OFF
+   * and reported as unavailable). Never throws for "not configured".
+   */
+  coworker: () => BedrockProvider | null;
+  /** 12 lowercase hex characters of randomness for opaque ids. Injected so tests are deterministic. */
+  newId: () => string;
 }
 
 /** Production dependencies. Throws (=> 500, fail closed) if the tables are not configured. */
@@ -38,5 +47,7 @@ export function defaultDeps(): ApiDeps {
     db: { client: docClient, coreTable, eventsTable },
     now: () => new Date().toISOString(),
     runner: lambdaRunnerFromEnv,
+    coworker: bedrockProviderFromEnv,
+    newId: () => randomBytes(6).toString("hex"),
   };
 }

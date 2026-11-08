@@ -19,6 +19,8 @@ import type {
   ListAssignableEmployeesResponse,
   IncidentConfig,
   IncidentReport,
+  ListCoworkerMessagesResponse,
+  PostCoworkerMessageResponse,
   MeResponse,
   ReviewBundle,
   ReviewDecision,
@@ -32,7 +34,9 @@ import {
   GetSessionResponseSchema,
   ListAssignableEmployeesResponseSchema,
   ListAssignmentsResponseSchema,
+  ListCoworkerMessagesResponseSchema,
   MeResponseSchema,
+  PostCoworkerMessageResponseSchema,
   ReviewBundleResponseSchema,
   SaveConfigResponseSchema,
   SessionActionResponseSchema,
@@ -251,4 +255,30 @@ export async function postReviewDecision(
       ...(text ? { feedback: text } : {}),
     })
   ).review;
+}
+
+// -- AI coworker ---------------------------------------------------------------
+
+/** The persisted conversation for a session, plus whether a new question can be asked right now. */
+export function fetchCoworker(sessionId: string): Promise<ListCoworkerMessagesResponse> {
+  return request("GET", `/v1/sessions/${seg(sessionId)}/messages`, ListCoworkerMessagesResponseSchema);
+}
+
+/**
+ * Ask the AI coworker one question. The body is exactly { message }: the model, the prompt, the role
+ * and everything else are decided by the server. Reuse `idempotencyKey` only to RETRY the same text
+ * after a lost response; a new question (or a deliberate retry after an error) needs a new key.
+ */
+export function sendCoworkerMessage(
+  sessionId: string,
+  message: string,
+  idempotencyKey: string,
+): Promise<PostCoworkerMessageResponse> {
+  return request(
+    "POST",
+    `/v1/sessions/${seg(sessionId)}/messages`,
+    PostCoworkerMessageResponseSchema,
+    { message },
+    { "Idempotency-Key": idempotencyKey },
+  );
 }

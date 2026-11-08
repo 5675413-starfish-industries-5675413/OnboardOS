@@ -19,4 +19,5 @@ export * from "./assignment.js";
 export * from "./testRun.js";
 export * from "./submission.js";
 export * from "./review.js";
+export * from "./coworker.js";
 export * from "./session.js";

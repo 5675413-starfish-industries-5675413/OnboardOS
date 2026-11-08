@@ -57,4 +57,20 @@ describe("browser source boundary", () => {
     expect(api).not.toMatch(/\bpassed\s*:/);
     expect(api).not.toMatch(/\bstatus\s*:\s*["']/);
   });
+
+  it("renders the AI coworker panel only behind the feature flag, and nowhere else", () => {
+    const page = readFileSync(join(SRC, "pages", "SessionPage.tsx"), "utf8");
+    expect(page).toMatch(/config\.coworkerEnabled\s*&&\s*\(\s*<CoworkerPanel/);
+    expect(page.match(/<CoworkerPanel/g)).toHaveLength(1);
+    for (const file of FILES.filter((f) => !f.endsWith("SessionPage.tsx") && !f.endsWith("CoworkerPanel.tsx"))) {
+      expect(readFileSync(file, "utf8"), file).not.toContain("<CoworkerPanel");
+    }
+  });
+
+  it("never names a model, prompt or provider in browser code", () => {
+    for (const file of FILES) {
+      const text = readFileSync(file, "utf8");
+      expect(text, file).not.toMatch(/ConverseCommand|client-bedrock|bedrock-runtime|amazon\.nova|coworker-v1|You are "Coworker"/);
+    }
+  });
 });

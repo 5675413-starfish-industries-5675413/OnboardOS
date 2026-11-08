@@ -108,6 +108,8 @@ describe("API routes and authorization", () => {
     "POST /v1/sessions/{sessionId}/submissions",
     "GET /v1/reviews/{submissionId}",
     "POST /v1/reviews/{submissionId}/decision",
+    "GET /v1/sessions/{sessionId}/messages",
+    "POST /v1/sessions/{sessionId}/messages",
   ];
 
   it("declares exactly the intended routes: nothing extra can be added silently", () => {
@@ -266,10 +268,15 @@ describe("IAM least privilege", () => {
       expect(resource("OnboardOSEventsTable")).not.toContain("GlobalSecondaryIndexes");
     });
 
-    it("has no other DynamoDB statement, and the complete action set is exactly the four used", () => {
-      expect(stmts().map((x) => x.sid).filter((sid) => !/Logging|Logs/i.test(sid)).sort())
+    it("the pre-existing statements are exactly the ones before the coworker, unchanged", () => {
+      expect(stmts().map((x) => x.sid).filter((sid) => !/Logging|Logs|^Coworker/i.test(sid)).sort())
         .toEqual(["CoreItemAccess", "CoreQuery", "EventsAppend", "EventsRead", "InvokeScenarioRunner"]);
-      const all = [...resource(role).matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
+    });
+
+    it("outside the conditional coworker policy, the DynamoDB action set is exactly the four used", () => {
+      const withoutCoworker = resource(role).replace(/- !If[\s\S]*?- !Ref AWS::NoValue\n/, "");
+      expect(withoutCoworker).not.toContain("Coworker");
+      const all = [...withoutCoworker.matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0]);
       expect([...new Set(all)].sort()).toEqual([
         "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query", "dynamodb:UpdateItem",
       ]);
@@ -280,7 +287,7 @@ describe("IAM least privilege", () => {
       expect(st.actions).toEqual(["lambda:InvokeFunction"]);
       const listed: string[] = [];
       for (const line of st.resources.split("\n").slice(1)) {
-        if (!line.trim().startsWith("- ") || /^\s*- (PolicyName|Sid):/.test(line)) break;
+        if (!line.trim().startsWith("- ") || /^\s*- (PolicyName:|Sid:|!If)/.test(line)) break;
         listed.push(line.trim().slice(2));
       }
       expect(listed).toEqual(["!GetAtt OnboardOSScenarioRunner.Arn"]);
@@ -288,9 +295,9 @@ describe("IAM least privilege", () => {
       expect([...new Set(lambdaActions)]).toEqual(["lambda:InvokeFunction"]);
     });
 
-    it("never grants Scan, Delete, Batch, ConditionCheck, table administration or any Events write other than append", () => {
+    it("never grants Scan, Delete, Batch, table administration or any Events write other than append", () => {
       const text = resource(role);
-      for (const forbidden of ["Scan", "DeleteItem", "BatchWriteItem", "BatchGetItem", "ConditionCheckItem", "DescribeTable", "CreateTable", "DeleteTable", "UpdateTable", "dynamodb:*"]) {
+      for (const forbidden of ["Scan", "DeleteItem", "BatchWriteItem", "BatchGetItem", "DescribeTable", "CreateTable", "DeleteTable", "UpdateTable", "dynamodb:*"]) {
         expect(text, forbidden).not.toContain(forbidden);
       }
     });
@@ -321,6 +328,89 @@ describe("IAM least privilege", () => {
       expect(role).toMatch(/Service:\s*lambda\.amazonaws\.com/);
       expect(role).not.toMatch(/AWS:\s/);
     }
+  });
+});
+
+describe("AI coworker (Phase 4) is additive, optional and tightly scoped", () => {
+  const apiRole = () => resource("OnboardOSApiRole");
+  const coworkerPolicy = () => {
+    const m = apiRole().match(/- !If\n\s+- HasCoworkerModel\n([\s\S]*?)\n\s+- !Ref AWS::NoValue/);
+    if (!m) throw new Error("conditional coworker policy not found");
+    return m[1] as string;
+  };
+
+  it("has a model parameter that defaults to empty and can only ever be empty or the verified model", () => {
+    const param = TEXT.slice(TEXT.indexOf("  CoworkerModelId:"), TEXT.indexOf("Conditions:"));
+    expect(param).toMatch(/Type: String/);
+    expect(param).toMatch(/Default: ""/);
+    expect(listUnder(param, "AllowedValues")).toEqual(["", "amazon.nova-micro-v1:0"]);
+  });
+
+  it("defines HasCoworkerModel as 'the parameter is not empty'", () => {
+    expect(TEXT).toMatch(/Conditions:\s*\n\s+HasCoworkerModel: !Not \[!Equals \[!Ref CoworkerModelId, ""\]\]/);
+  });
+
+  it("passes the model id to the API function only (never the runner or smoke function)", () => {
+    expect(resource("OnboardOSApiFunction")).toContain("ONBOARDOS_COWORKER_MODEL_ID: !Ref CoworkerModelId");
+    expect(resource("OnboardOSScenarioRunner")).not.toMatch(/COWORKER|CoworkerModelId/);
+    expect(resource("OnboardOSSmokeFunction")).not.toMatch(/COWORKER|CoworkerModelId/);
+  });
+
+  it("creates the Bedrock permission only when a model is configured (Fn::If ... NoValue)", () => {
+    expect(apiRole()).toMatch(/- !If\n\s+- HasCoworkerModel\n\s+- PolicyName: OnboardOSApiCoworker/);
+    expect(apiRole()).toMatch(/- !Ref AWS::NoValue/);
+    // the only place Bedrock is mentioned in the whole role is inside that conditional policy
+    const outside = apiRole().replace(coworkerPolicy(), "");
+    expect(outside).not.toMatch(/bedrock/i);
+  });
+
+  it("grants exactly bedrock:InvokeModel on exactly one foundation-model ARN built from the allowed parameter", () => {
+    const st = coworkerPolicy();
+    const bedrockActions = [...st.matchAll(/bedrock:[A-Za-z*]+/g)].map((m) => m[0]);
+    expect(bedrockActions).toEqual(["bedrock:InvokeModel"]);
+    const sid = st.slice(st.indexOf("Sid: CoworkerInvokeModel"), st.indexOf("Sid: CoworkerSessionOpenCheck"));
+    const resources = [...sid.matchAll(/^\s+- (!Sub .+)$/gm)].map((m) => m[1]);
+    expect(resources).toEqual(['!Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${CoworkerModelId}"']);
+    expect(sid).not.toMatch(/inference-profile|\*/);
+  });
+
+  it("never uses bedrock:* or a wildcard Bedrock resource anywhere in the template", () => {
+    expect(TEXT).not.toMatch(/bedrock:\*/);
+    expect(TEXT).not.toMatch(/arn:aws:bedrock:[^"\n]*\*/);
+    expect([...TEXT.matchAll(/bedrock:[A-Za-z]+/g)].map((m) => m[0])).toEqual(["bedrock:InvokeModel"]);
+  });
+
+  it("adds dynamodb:ConditionCheckItem on the Core table only, inside the same conditional policy", () => {
+    const st = coworkerPolicy();
+    const sid = st.slice(st.indexOf("Sid: CoworkerSessionOpenCheck"));
+    expect([...sid.matchAll(/dynamodb:[A-Za-z*]+/g)].map((m) => m[0])).toEqual(["dynamodb:ConditionCheckItem"]);
+    expect(sid).toContain("!GetAtt OnboardOSCoreTable.Arn");
+    expect(sid).not.toContain("OnboardOSEventsTable");
+    // and nowhere else in the template
+    expect([...TEXT.matchAll(/ConditionCheckItem/g)]).toHaveLength(1);
+  });
+
+  it("keeps the Lambda timeout above the Bedrock call timeout, with room for the DynamoDB work around it", () => {
+    // The API function inherits the Globals timeout; it must not be lowered below the 20 s Bedrock abort.
+    const globals = TEXT.slice(TEXT.indexOf("Globals:"), TEXT.indexOf("Resources:"));
+    expect(globals).toMatch(/Timeout:\s*29\b/);
+    expect(resource("OnboardOSApiFunction")).not.toMatch(/^\s+Timeout:/m);
+  });
+
+  it("gives Bedrock access to no other role", () => {
+    for (const name of ["OnboardOSRunnerRole", "OnboardOSSmokeRole"]) expect(resource(name)).not.toMatch(/bedrock|ConditionCheckItem/i);
+  });
+
+  it("does not touch the table definitions, Cognito or the runner function", () => {
+    for (const name of ["OnboardOSCoreTable", "OnboardOSEventsTable", "OnboardOSUserPool", "OnboardOSSpaClient", "OnboardOSScenarioRunner"]) {
+      expect(resource(name), name).not.toMatch(/coworker|bedrock|CHAT#/i);
+    }
+  });
+
+  it("protects both message routes with the JWT authorizer and exposes them on one path", () => {
+    const msg = apiRoutes().filter((r) => r.path === "/v1/sessions/{sessionId}/messages");
+    expect(msg.map((r) => r.method).sort()).toEqual(["GET", "POST"]);
+    for (const r of msg) expect(r.authorizer).toBe("JwtAuthorizer");
   });
 });
 

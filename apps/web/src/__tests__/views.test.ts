@@ -7,14 +7,20 @@ import {
   assignmentStatusLabel,
   assignmentStatusTone,
   canRunTests,
+  coworkerInputDisabled,
   describeApiError,
   hasAssignment,
+  hasPendingTurn,
+  keepKeyAfter,
   mergeAssignment,
+  mergeTurn,
   parseTimeoutInput,
+  resolveSendKey,
   reviewQueue,
   runBadge,
   shortHash,
   submissionReadiness,
+  validateCoworkerMessage,
   validateDecision,
   validateReport,
   viewForRole,
@@ -225,5 +231,74 @@ describe("review helpers", () => {
     expect(describeApiError(new ApiError(409, "EVIDENCE_MISMATCH", "x"))).toMatch(/no longer the current/);
     expect(describeApiError(new ApiError(409, "ALREADY_SUBMITTED", "x"))).toMatch(/already been submitted/);
     expect(describeApiError(new ApiError(409, "NOT_AWAITING_REVIEW", "x"))).toMatch(/not awaiting review/);
+  });
+});
+
+describe("AI coworker message rules (UX only; the server enforces the same limits)", () => {
+  it("accepts 1-600 characters and trims", () => {
+    expect(validateCoworkerMessage("  hello  ")).toEqual({ ok: true, text: "hello" });
+    expect(validateCoworkerMessage("x".repeat(600)).ok).toBe(true);
+  });
+  it("rejects empty, whitespace-only and over-long text with a reason", () => {
+    for (const bad of ["", "   \n ", "x".repeat(601)]) {
+      const r = validateCoworkerMessage(bad);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message.length).toBeGreaterThan(5);
+    }
+  });
+});
+
+describe("AI coworker retry keys", () => {
+  let n = 0;
+  const mint = () => `key-${++n}`;
+  it("the same text reuses the same key while the outcome is unknown, so a retry cannot create a second turn", () => {
+    const first = resolveSendKey(null, "why is it timing out?", mint);
+    const retry = resolveSendKey(first, "why is it timing out?", mint);
+    expect(retry).toBe(first);
+  });
+  it("different text always gets a new key", () => {
+    const first = resolveSendKey(null, "a", mint);
+    const second = resolveSendKey(first, "b", mint);
+    expect(second.key).not.toBe(first.key);
+    expect(second.text).toBe("b");
+  });
+  it("keeps the key only when the server's answer is unknown (no response or a server fault)", () => {
+    expect(keepKeyAfter(new ApiError(0, "NETWORK_ERROR", "x"))).toBe(true);
+    expect(keepKeyAfter(new ApiError(500, "INTERNAL_ERROR", "x"))).toBe(true);
+    expect(keepKeyAfter(new ApiError(503, "AI_UNAVAILABLE", "x"))).toBe(true);
+    for (const status of [400, 404, 409, 422, 429]) expect(keepKeyAfter(new ApiError(status, "X", "x")), String(status)).toBe(false);
+    expect(keepKeyAfter(new Error("anything else"))).toBe(false);
+  });
+});
+
+describe("AI coworker conversation helpers", () => {
+  const turn = (id: string, status: "PENDING" | "COMPLETE" | "ERROR" = "COMPLETE") =>
+    ({ turnId: id, status, userText: "q", reply: null, truncated: false, modelId: "m", createdAt: "t", completedAt: null, errorCode: null, errorMessage: null }) as never;
+  it("detects a pending turn so the page keeps polling", () => {
+    expect(hasPendingTurn([turn("turn_1000000000001_aaaaaaaaaaaa"), turn("turn_1000000000002_aaaaaaaaaaaa", "PENDING")])).toBe(true);
+    expect(hasPendingTurn([turn("turn_1000000000001_aaaaaaaaaaaa", "ERROR")])).toBe(false);
+    expect(hasPendingTurn([])).toBe(false);
+  });
+  it("merges a returned turn by id, keeping time order and never duplicating", () => {
+    const a = turn("turn_1000000000001_aaaaaaaaaaaa", "PENDING");
+    const b = turn("turn_1000000000002_aaaaaaaaaaaa");
+    const done = turn("turn_1000000000001_aaaaaaaaaaaa", "COMPLETE");
+    const merged = mergeTurn(mergeTurn([], b), a);
+    expect(merged.map((t) => t.turnId)).toEqual(["turn_1000000000001_aaaaaaaaaaaa", "turn_1000000000002_aaaaaaaaaaaa"]);
+    const replaced = mergeTurn(merged, done);
+    expect(replaced).toHaveLength(2);
+    expect(replaced[0]?.status).toBe("COMPLETE");
+  });
+  it("disables the controls while sending, when the server says no, and before the state has loaded", () => {
+    expect(coworkerInputDisabled({ canSend: true }, false)).toBe(false);
+    expect(coworkerInputDisabled({ canSend: true }, true)).toBe(true);
+    expect(coworkerInputDisabled({ canSend: false }, false)).toBe(true);
+    expect(coworkerInputDisabled(null, false)).toBe(true);
+  });
+  it("explains the coworker error codes in plain language", () => {
+    expect(describeApiError(new ApiError(409, "COWORKER_BUSY", "x"))).toMatch(/still answering/);
+    expect(describeApiError(new ApiError(409, "SESSION_NOT_OPEN", "x"))).toMatch(/submitted/);
+    expect(describeApiError(new ApiError(429, "COWORKER_LIMIT_REACHED", "x"))).toMatch(/allowance/);
+    expect(describeApiError(new ApiError(503, "AI_UNAVAILABLE", "x"))).toMatch(/not available/);
   });
 });

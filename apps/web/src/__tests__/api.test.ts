@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ApiError,
   createAssignment,
+  fetchCoworker,
   fetchReview,
   fetchSession,
   fetchTestRun,
@@ -12,6 +13,7 @@ import {
   postReviewDecision,
   requestTestRun,
   saveConfig,
+  sendCoworkerMessage,
   startAssignment,
   submitReport,
 } from "../lib/api.js";
@@ -449,5 +451,77 @@ describe("submission and review calls", () => {
   it("a decision on an already-decided submission is a typed 409", async () => {
     fetchMock.mockResolvedValue(json(409, { code: "ALREADY_DECIDED", message: "decided", requestId: "r" }));
     await expect(postReviewDecision(SUB_ID, "APPROVE", "")).rejects.toMatchObject({ status: 409, code: "ALREADY_DECIDED" });
+  });
+});
+
+const TURN = {
+  turnId: "turn_1794045600000_0123456789ab",
+  status: "COMPLETE",
+  userText: "What should I check first?",
+  reply: "Compare the upstream latency in the logs with the configured timeout.",
+  truncated: false,
+  modelId: "amazon.nova-micro-v1:0",
+  createdAt: "2026-11-07T10:00:00.000Z",
+  completedAt: "2026-11-07T10:00:01.000Z",
+  errorCode: null,
+  errorMessage: null,
+};
+const COWORKER_STATE = {
+  enabled: true, canSend: true, reason: null, modelId: "amazon.nova-micro-v1:0", completedTurns: 1, attemptsUsed: 1,
+  limits: { maxMessageChars: 600, maxCompletedTurns: 20, maxAttempts: 30 },
+};
+
+describe("AI coworker calls", () => {
+  beforeEach(() => signIn(storage, "tok"));
+
+  it("fetchCoworker GETs the persisted conversation and validates it", async () => {
+    fetchMock.mockResolvedValue(json(200, { turns: [TURN], coworker: COWORKER_STATE }));
+    const r = await fetchCoworker(SESSION.sessionId);
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/messages`);
+    expect(sent().init.method).toBe("GET");
+    expect(sent().body).toBeUndefined();
+    expect(r.turns[0]?.reply).toMatch(/upstream latency/);
+    expect(r.coworker.modelId).toBe("amazon.nova-micro-v1:0");
+  });
+
+  it("sendCoworkerMessage sends exactly { message } and the Idempotency-Key -- no model, role, prompt or status", async () => {
+    fetchMock.mockResolvedValue(json(201, { turn: TURN, coworker: COWORKER_STATE, created: true }));
+    const r = await sendCoworkerMessage(SESSION.sessionId, "What should I check first?", "key-abcdef123456");
+    expect(sent().url).toBe(`https://api.example.com/v1/sessions/${SESSION.sessionId}/messages`);
+    expect(sent().init.method).toBe("POST");
+    expect(sent().body).toEqual({ message: "What should I check first?" });
+    expect(sent().headers["Idempotency-Key"]).toBe("key-abcdef123456");
+    expect(sent().headers["Authorization"]).toBe("Bearer tok");
+    expect(r.created).toBe(true);
+  });
+
+  it("surfaces busy, closed, limit and unavailable responses as typed errors", async () => {
+    for (const [status, code] of [[409, "COWORKER_BUSY"], [409, "SESSION_NOT_OPEN"], [429, "COWORKER_LIMIT_REACHED"], [503, "AI_UNAVAILABLE"]] as const) {
+      fetchMock.mockResolvedValue(json(status, { code, message: "x", requestId: "r" }));
+      await expect(sendCoworkerMessage(SESSION.sessionId, "hi", "key-abcdef123456")).rejects.toMatchObject({ status, code });
+    }
+  });
+
+  it("rejects a turn that claims to be complete without a reply, or an unknown status, or an oversized reply", async () => {
+    for (const bad of [{ ...TURN, status: "DONE" }, { ...TURN, reply: "x".repeat(2001) }, { ...TURN, turnId: "t1" }, { ...TURN, modelId: undefined }]) {
+      fetchMock.mockResolvedValue(json(200, { turns: [bad], coworker: COWORKER_STATE }));
+      await expect(fetchCoworker(SESSION.sessionId)).rejects.toThrow();
+    }
+  });
+
+  it("does not leak provider detail even if the server sent it: extra keys are stripped by the contract", async () => {
+    fetchMock.mockResolvedValue(json(200, { turns: [{ ...TURN, usageTokens: { input: 1 }, providerRequestId: "rid" }], coworker: COWORKER_STATE }));
+    const r = await fetchCoworker(SESSION.sessionId);
+    expect(JSON.stringify(r)).not.toMatch(/usageTokens|providerRequestId/);
+  });
+
+  it("makes no request without a session, and drops the session on 401", async () => {
+    storage.clear();
+    await expect(fetchCoworker(SESSION.sessionId)).rejects.toMatchObject({ code: "NO_SESSION" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    signIn(storage, "tok");
+    fetchMock.mockResolvedValue(json(401, { message: "Unauthorized" }));
+    await expect(sendCoworkerMessage(SESSION.sessionId, "hi", "key-abcdef123456")).rejects.toMatchObject({ status: 401 });
+    expect(getSession()).toBeNull();
   });
 });
