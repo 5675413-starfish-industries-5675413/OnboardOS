@@ -110,6 +110,11 @@ const TurnSchema = z
     isTruncated: z.boolean(),
     modelId: z.string(),
     promptVersion: z.string(),
+    /** Which coaching policy built this turn's request (audit; absent on turns created before prompt v2). */
+    coachingProfileId: z.string().optional(),
+    coachingProfileVersion: z.number().int().positive().optional(),
+    coachingProfileHash: z.string().optional(),
+    coachingProfileSource: z.enum(["BUILTIN", "PLATFORM_DEFAULT", "INVALID_FALLBACK"]).optional(),
     createdAt: z.string(),
     completedAt: z.string().nullable(),
     errorCode: z.string().nullable(),
@@ -146,6 +151,7 @@ export function buildPendingTurn(input: {
   userText: string;
   modelId: string;
   promptVersion: string;
+  coaching?: { profileId: string; profileVersion: number; hash: string; source: "BUILTIN" | "PLATFORM_DEFAULT" | "INVALID_FALLBACK" };
   now: string;
 }): TurnRecord {
   return {
@@ -161,6 +167,14 @@ export function buildPendingTurn(input: {
     isTruncated: false,
     modelId: input.modelId,
     promptVersion: input.promptVersion,
+    ...(input.coaching
+      ? {
+          coachingProfileId: input.coaching.profileId,
+          coachingProfileVersion: input.coaching.profileVersion,
+          coachingProfileHash: input.coaching.hash,
+          coachingProfileSource: input.coaching.source,
+        }
+      : {}),
     createdAt: input.now,
     completedAt: null,
     errorCode: null,

@@ -11,6 +11,7 @@ import type { PublishedScenario } from "@onboardos/scenario-engine";
 import { INC_104_V1 } from "./inc104.js";
 export type { PublishedScenario } from "@onboardos/scenario-engine";
 export { INC_104_V1, INC_104_PUBLIC } from "./inc104.js";
+export { BUILTIN_COACHING_PROFILES, INC_104_COACHING_V1, getBuiltinCoachingProfile } from "./coaching.js";
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {

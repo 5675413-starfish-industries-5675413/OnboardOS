@@ -123,7 +123,7 @@ describe("asking a question", () => {
     const res = await askCoworker(api, PEOPLE.empA, sessionId, "q");
     expect(turnItems()[0]).toMatchObject({
       status: "COMPLETE", usageTokens: { input: 120, output: 30 }, providerRequestId: "bedrock-req-1", stopReason: "end_turn",
-      latencyMs: 210, promptVersion: "coworker-v1", employeeSub: PEOPLE.empA.sub,
+      latencyMs: 210, promptVersion: "coworker-v2", employeeSub: PEOPLE.empA.sub,
     });
     expect(res.raw).not.toMatch(/bedrock-req|usageTokens|promptVersion|providerRequestId|stopReason|latencyMs/);
     expect(res.raw).not.toContain(PEOPLE.empA.sub);
@@ -963,5 +963,114 @@ describe("regression: existing routes are unaffected", () => {
     for (const route of ["PUT /v1/sessions/{sessionId}/messages", "DELETE /v1/sessions/{sessionId}/messages", "PATCH /v1/sessions/{sessionId}/messages", "GET /v1/sessions/{sessionId}/messages/{turnId}"]) {
       expect((await api.call({ route, as: PEOPLE.empA, params: { sessionId }, body: {} })).status).toBe(404);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Generalized context (prompt coworker-v2): the route feeds the builder from server records.
+
+describe("conversation context through the real route", () => {
+  it("attaches the scenario version's coaching profile and the prompt version", async () => {
+    await askCoworker(api, PEOPLE.empA, sessionId, "Where do I start?");
+    const system = calls()[0]!.system;
+    expect(system).toContain("coworker-v2");
+    expect(system).toContain("<<<COACHING CONTEXT");
+    expect(system).toContain("junior cloud engineer");
+    expect(system).toContain("Assistance level GUIDE");
+  });
+
+  it("regression: after a saved change, the model is told the current value and that the log value is historical", async () => {
+    await api.call({ route: R.saveConfig, as: PEOPLE.empA, params: { sessionId }, body: { expectedStateVersion: 1, config: { request_timeout_ms: 1800 } } });
+    await askCoworker(api, PEOPLE.empA, sessionId, "Why are the logs showing a different value?");
+    const system = calls()[0]!.system;
+    expect(system).toContain("CURRENT CONFIGURATION (live, saved revision 1): request_timeout_ms = 1800");
+    expect(system).toContain("differs from the baseline: request_timeout_ms was 800, now 1800");
+    expect(system).toContain("HISTORICAL RECORD");
+  });
+
+  it("regression: a terse follow-up arrives as the last user message directly after the answer it refers to", async () => {
+    const first = await askCoworker(api, PEOPLE.empA, sessionId, "Any hints on what I can look for?");
+    await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.");
+    const second = calls()[1]!;
+    expect(second.messages).toEqual([
+      { role: "user", text: "Any hints on what I can look for?" },
+      { role: "assistant", text: first.body.turn.reply },
+      { role: "user", text: "Simplify." },
+    ]);
+  });
+
+  it("a failed turn is not part of the conversation the model is shown next", async () => {
+    await askCoworker(api, PEOPLE.empA, sessionId, "good question");
+    api.coworker!.behave(async () => { throw new CoworkerProviderError("AI_TIMEOUT"); });
+    await askCoworker(api, PEOPLE.empA, sessionId, "this one fails");
+    api.coworker!.behave(async (_r, n) => replyOf(`reply ${n}`));
+    await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.");
+    const texts = calls().at(-1)!.messages.map((m) => m.text);
+    expect(texts).not.toContain("this one fails");
+    expect(texts.at(-1)).toBe("Simplify.");
+    expect(texts[0]).toBe("good question");
+  });
+
+  it("another employee's conversation never appears in this session's request, in either direction", async () => {
+    const other = await startedFor(api, PEOPLE.empA2);
+    await askCoworker(api, PEOPLE.empA, sessionId, "alpha-private-phrase");
+    await askCoworker(api, PEOPLE.empA2, other.sessionId, "beta-private-phrase");
+    await askCoworker(api, PEOPLE.empA, sessionId, "follow up A");
+    await askCoworker(api, PEOPLE.empA2, other.sessionId, "follow up B");
+    const sentA = JSON.stringify(calls().filter((c) => JSON.stringify(c).includes("alpha-private-phrase")));
+    const sentB = JSON.stringify(calls().filter((c) => JSON.stringify(c).includes("beta-private-phrase")));
+    expect(sentA).not.toContain("beta-private-phrase");
+    expect(sentB).not.toContain("alpha-private-phrase");
+  });
+
+  it("chat with the generalized context still leaves stateVersion, events and every non-chat record untouched", async () => {
+    const before = [JSON.stringify(stateItem()), JSON.stringify(api.db.all(EVENTS)), JSON.stringify(nonChat())];
+    await askCoworker(api, PEOPLE.empA, sessionId, "q1");
+    await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.");
+    expect([JSON.stringify(stateItem()), JSON.stringify(api.db.all(EVENTS)), JSON.stringify(nonChat())]).toEqual(before);
+  });
+
+  it("an identical retry is still answered from the ledger with no second model call", async () => {
+    const key = newKey();
+    await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.", key);
+    const retry = await askCoworker(api, PEOPLE.empA, sessionId, "Simplify.", key);
+    expect(retry.status).toBe(200);
+    expect(retry.body.created).toBe(false);
+    expect(calls()).toHaveLength(1);
+  });
+});
+
+describe("each turn records which coaching policy built its request", () => {
+  it("stores profile id, version, content hash and source on the turn, and never sends them to the browser", async () => {
+    const res = await askCoworker(api, PEOPLE.empA, sessionId, "Where do I start?");
+    expect(turnItems()[0]).toMatchObject({
+      coachingProfileId: "builtin-inc-104-coaching",
+      coachingProfileVersion: 1,
+      coachingProfileSource: "BUILTIN",
+      coachingProfileHash: "sha256:0f6af6460ca534f788a1731d6a8f970125230397e9bb0768c046009c9a34830d",
+      promptVersion: "coworker-v2",
+    });
+    expect(JSON.stringify(res.body)).not.toMatch(/coachingProfile|builtin-inc-104/);
+    expect(JSON.stringify((await listCoworker(api, PEOPLE.empA, sessionId)).body)).not.toMatch(/coachingProfile|builtin-inc-104/);
+  });
+
+  it("the structured log names the policy but contains no text", async () => {
+    await askCoworker(api, PEOPLE.empA, sessionId, "a private question");
+    const line = logs.find((l) => l.includes("coworker_turn"))!;
+    expect(line).toContain("builtin-inc-104-coaching");
+    expect(line).toContain('"coachingProfileSource":"BUILTIN"');
+    expect(line).not.toContain("a private question");
+  });
+
+  it("turns created before prompt v2 (no policy fields) are still read and shown", async () => {
+    await askCoworker(api, PEOPLE.empA, sessionId, "old style");
+    const item = turnItems()[0]!;
+    for (const k of ["coachingProfileId", "coachingProfileVersion", "coachingProfileHash", "coachingProfileSource"]) delete item[k];
+    item["promptVersion"] = "coworker-v1";
+    api.db.put(CORE, item);
+    expect(turnItems()[0]).not.toHaveProperty("coachingProfileId");
+    const listed = await listCoworker(api, PEOPLE.empA, sessionId);
+    expect(listed.body.turns).toHaveLength(1);
+    expect(listed.body.turns[0].userText).toBe("old style");
   });
 });

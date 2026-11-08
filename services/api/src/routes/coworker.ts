@@ -41,7 +41,7 @@ import {
   type BedrockProvider,
   type CoworkerErrorCode,
 } from "../bedrock.js";
-import { COWORKER_PROMPT_VERSION, buildCoworkerRequest, type PriorTurn } from "../coworkerContext.js";
+import { COWORKER_PROMPT_VERSION, buildCoworkerRequest, resolveCoaching, type PriorTurn } from "../coworkerContext.js";
 import {
   FRESH_CONTROL,
   LEASE_MS,
@@ -239,7 +239,8 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
     // Everything the model will be told is built BEFORE the reservation, from authorized records.
     const history = await historyFor(deps, state.sessionId);
     const currentRun = await currentRunFor(deps, current, scenario.testSuiteVersion);
-    const request = buildCoworkerRequest({ scenario, state: current, currentRun, history, message });
+    const coaching = resolveCoaching(scenario);
+    const request = buildCoworkerRequest({ scenario, coaching: coaching.profile, state: current, currentRun, history, message });
 
     // A previous holder whose lease expired is closed in the same transaction.
     let stranded: { turnId: string; code: string; message: string } | null = null;
@@ -259,6 +260,12 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       userText: message,
       modelId: provider.modelId,
       promptVersion: COWORKER_PROMPT_VERSION,
+      coaching: {
+        profileId: coaching.profile.profileId,
+        profileVersion: coaching.profile.profileVersion,
+        hash: coaching.hash,
+        source: coaching.source,
+      },
       now,
     });
     const nextControl: ControlRecord = {
@@ -338,6 +345,9 @@ export async function handleSendMessage(event: APIGatewayProxyEventV2, deps: Api
       latencyMs: outcome.kind === "COMPLETE" ? outcome.latencyMs : null,
       modelId: provider.modelId,
       promptVersion: COWORKER_PROMPT_VERSION,
+      coachingProfileId: turn.coachingProfileId ?? null,
+      coachingProfileVersion: turn.coachingProfileVersion ?? null,
+      coachingProfileSource: turn.coachingProfileSource ?? null,
     }),
   );
 
