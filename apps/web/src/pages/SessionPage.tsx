@@ -30,6 +30,7 @@ import {
   type Tab,
 } from "../lib/views.js";
 import { config } from "../lib/config.js";
+import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import { CoworkerPanel } from "../views/CoworkerPanel.js";
 
 /** How often a PENDING run is re-read from the server. */
@@ -269,27 +270,28 @@ export function SessionPage() {
 
   if (loading) {
     return (
-      <div className="container-wide">
+      <WorkspaceShell area="Investigation">
         <div className="card"><p role="status">Loading your investigation…</p></div>
-      </div>
+      </WorkspaceShell>
     );
   }
 
   if (!session) {
     return (
-      <div className="container-wide">
+      <WorkspaceShell area="Investigation">
         <div className="card">
           <h1>Investigation unavailable</h1>
           {error && <div className="error" role="alert">{error}</div>}
           <Link to="/app" className="btn btn-sm">Back to your assignments</Link>
         </div>
-      </div>
+      </WorkspaceShell>
     );
   }
 
   const { scenario } = session;
 
   return (
+    <WorkspaceShell area="Investigation">
     <div className="container-wide">
       <div className="card">
         <div className="row">
@@ -379,6 +381,7 @@ export function SessionPage() {
 
       <PreviousAttempts session={session} />
     </div>
+    </WorkspaceShell>
   );
 }
 

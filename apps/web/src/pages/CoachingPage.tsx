@@ -4,6 +4,7 @@ import type { MeResponse } from "@onboardos/contracts";
 import { getMe } from "../lib/api.js";
 import { config } from "../lib/config.js";
 import { describeApiError } from "../lib/views.js";
+import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import { CoachingStudio } from "../views/CoachingStudio.js";
 
 export const LEAVE_WARNING = "You have unsaved changes to the AI coworker settings. Leave this page and lose them?";
@@ -37,6 +38,7 @@ function CoachingPageInner() {
   const membership = me?.memberships.find((m) => m.role === "manager" || m.role === "org_admin");
 
   return (
+    <WorkspaceShell area="Coaching" organization={membership?.organizationName} onLeave={() => !dirty || window.confirm(LEAVE_WARNING)}>
     <div className="container-wide">
       <div className="card">
         <div className="row">
@@ -55,5 +57,6 @@ function CoachingPageInner() {
       {me && !membership && <div className="card"><div className="error" role="alert">Only managers and administrators can configure the AI coworker.</div></div>}
       {membership && <CoachingStudio orgId={membership.organizationId} scenarioId={scenarioId} onDirtyChange={onDirtyChange} />}
     </div>
+    </WorkspaceShell>
   );
 }

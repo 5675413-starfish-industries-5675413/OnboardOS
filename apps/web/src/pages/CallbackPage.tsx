@@ -53,7 +53,7 @@ export function CallbackPage() {
 
   if (error) {
     return (
-      <div className="container">
+      <div className="login-screen"><div className="container">
         <div className="card">
           <h1>Authentication Error</h1>
           <div className="error" role="alert">{error}</div>
@@ -61,15 +61,15 @@ export function CallbackPage() {
             Back to sign-in
           </a>
         </div>
-      </div>
+      </div></div>
     );
   }
 
   return (
-    <div className="container">
+    <div className="login-screen"><div className="container">
       <div className="card">
         <p role="status">Completing sign-in…</p>
       </div>
-    </div>
+    </div></div>
   );
 }

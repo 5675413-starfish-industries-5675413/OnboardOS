@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import type { ReviewBundle, ReviewDecision } from "@onboardos/contracts";
 import { ApiError, fetchReview, postReviewDecision } from "../lib/api.js";
+import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import {
   REPORT_FIELDS,
   assignmentStatusLabel,
@@ -79,21 +80,21 @@ export function ReviewPage() {
 
   if (loading) {
     return (
-      <div className="container-wide">
+      <WorkspaceShell area="Review">
         <div className="card"><p role="status">Loading the submission…</p></div>
-      </div>
+      </WorkspaceShell>
     );
   }
 
   if (!bundle) {
     return (
-      <div className="container-wide">
+      <WorkspaceShell area="Review">
         <div className="card">
           <h1>Submission unavailable</h1>
           {error && <div className="error" role="alert">{error}</div>}
           <Link to="/app" className="btn btn-sm">Back</Link>
         </div>
-      </div>
+      </WorkspaceShell>
     );
   }
 
@@ -103,6 +104,7 @@ export function ReviewPage() {
   const decisionCheck = validateDecision(decision, feedback);
 
   return (
+    <WorkspaceShell area="Review">
     <div className="container-wide">
       <div className="card">
         <div className="row">
@@ -290,5 +292,6 @@ export function ReviewPage() {
         )}
       </div>
     </div>
+    </WorkspaceShell>
   );
 }

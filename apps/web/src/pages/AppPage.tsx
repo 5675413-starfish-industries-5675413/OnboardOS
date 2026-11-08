@@ -4,6 +4,7 @@ import type { MeResponse, OrgRole } from "@onboardos/contracts";
 import { ApiError, getMe } from "../lib/api.js";
 import { getSession, logout } from "../lib/auth.js";
 import { viewForRole } from "../lib/views.js";
+import { WorkspaceShell } from "../components/WorkspaceShell.js";
 import { EmployeeView } from "../views/EmployeeView.js";
 import { ManagerView } from "../views/ManagerView.js";
 import { ScenariosSection } from "../views/ScenariosCard.js";
@@ -74,23 +75,21 @@ export function AppPage() {
 
   if (loading) {
     return (
-      <div className="container">
-        <div className="card">
-          <p>Loading your account…</p>
-        </div>
-      </div>
+      <WorkspaceShell area="Overview">
+        <div className="card"><p role="status">Loading your account…</p></div>
+      </WorkspaceShell>
     );
   }
 
   if (error) {
     return (
-      <div className="container">
+      <WorkspaceShell area="Overview">
         <div className="card">
           <h1>Error</h1>
           <div className="error">{error}</div>
           <button className="btn btn-sm" onClick={logout}>Sign out</button>
         </div>
-      </div>
+      </WorkspaceShell>
     );
   }
 
@@ -102,6 +101,7 @@ export function AppPage() {
   const view = primary ? viewForRole(primary.role) : "identity";
 
   return (
+    <WorkspaceShell area="Overview" organization={primary?.organizationName} username={me.username}>
     <div className={view === "identity" ? "container" : "container-wide"}>
       <div className="card">
         <div className="row">
@@ -149,5 +149,6 @@ export function AppPage() {
       {/* An ACTIVE org admin may also manage AI coworker coaching: the API already authorizes that role. Identity screen unchanged. */}
       {primary && view === "identity" && primary.role === "org_admin" && config.coachingStudioEnabled && <ScenariosSection orgId={primary.organizationId} />}
     </div>
+    </WorkspaceShell>
   );
 }
