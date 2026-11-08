@@ -2,11 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 
 Description: >
-  OnboardOS - Infrastructure Phases 1, 2A, 2B, 2C and 2D.
+  OnboardOS - Infrastructure Phases 1, 2A, 2B, 2C, 2D and 4.
   HTTP API (GET /health public; all /v1 routes JWT-protected), API Lambda,
   private smoke-test Lambda, private scenario-runner Lambda (invoked only by the
   API function), Cognito User Pool + SPA client, JWT authorizer, DynamoDB Core +
-  Events tables with GSIs, CloudWatch logging. No Bedrock or S3 in this phase.
+  Events tables with GSIs, CloudWatch logging. Optional Amazon Bedrock AI coworker (off unless CoworkerModelId is set). No S3.
 
 # ---------------------------------------------------------------------------
 # Parameters
@@ -25,6 +25,21 @@ Parameters:
       Organization ID used for the Northstar Cloud demo. Seeded into DynamoDB
       by the seed-demo script after deployment. Must match the value used
       when seeding membership records.
+
+  CoworkerModelId:
+    Type: String
+    Default: ""
+    # Only the verified model, or empty. A closed list means the IAM resource below can never
+    # contain a wildcard or an unreviewed model, whatever someone types at deploy time.
+    AllowedValues:
+      - ""
+      - "amazon.nova-micro-v1:0"
+    Description: >
+      Amazon Bedrock model for the AI coworker. Empty (the default) DISABLES the coworker: no
+      Bedrock permission is created and the API reports the feature as unavailable.
+
+Conditions:
+  HasCoworkerModel: !Not [!Equals [!Ref CoworkerModelId, ""]]
 
 # ---------------------------------------------------------------------------
 # SAM Globals
@@ -227,6 +242,8 @@ Resources:
           ONBOARDOS_ORG_ID: !Ref DemoOrgId
           # Name only (not a secret); the API may invoke exactly this function (see OnboardOSApiRole).
           ONBOARDOS_RUNNER_FUNCTION_NAME: !Ref OnboardOSScenarioRunner
+          # Empty disables the AI coworker. A model id, not a secret.
+          ONBOARDOS_COWORKER_MODEL_ID: !Ref CoworkerModelId
       Events:
         # Public route — no authorizer
         ApiHealth:
@@ -345,6 +362,73 @@ Resources:
             Method: POST
             Auth:
               Authorizer: JwtAuthorizer
+        # Phase 4 routes: JWT-protected; the Lambda authorizes session ownership on every call.
+        ApiListCoworkerMessages:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/messages
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiSendCoworkerMessage:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/sessions/{sessionId}/messages
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        # Milestone M1: manager coaching studio. All protected by the JWT authorizer; the Lambda then requires an
+        # ACTIVE manager/org_admin membership in the URL's organization. No new tables, indexes or IAM actions.
+        ApiListCoachingScenarios:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetCoachingStudio:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiSaveCoachingDraft:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft
+            Method: PUT
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiValidateCoaching:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiPublishCoaching:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish
+            Method: POST
+            Auth:
+              Authorizer: JwtAuthorizer
+        ApiGetCoachingVersion:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref OnboardOSHttpApi
+            Path: /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}
+            Method: GET
+            Auth:
+              Authorizer: JwtAuthorizer
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -448,6 +532,31 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !GetAtt OnboardOSScenarioRunner.Arn
+        # Phase 4: present ONLY when a coworker model is configured. With the default (empty)
+        # parameter this policy does not exist and the role is exactly as before.
+        - !If
+          - HasCoworkerModel
+          - PolicyName: OnboardOSApiCoworker
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                # One action on one foundation-model ARN in this region. No bedrock:*, no Resource: *,
+                # no inference-profile or cross-region access (the model is invoked directly on demand).
+                - Sid: CoworkerInvokeModel
+                  Effect: Allow
+                  Action:
+                    - bedrock:InvokeModel
+                  Resource:
+                    - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${CoworkerModelId}"
+                # A chat reservation checks, inside its transaction, that the session is still open
+                # without writing it. TransactWriteItems authorizes a ConditionCheck by this action.
+                - Sid: CoworkerSessionOpenCheck
+                  Effect: Allow
+                  Action:
+                    - dynamodb:ConditionCheckItem
+                  Resource:
+                    - !GetAtt OnboardOSCoreTable.Arn
+          - !Ref AWS::NoValue
         - PolicyName: OnboardOSApiDynamoDB
           PolicyDocument:
             Version: "2012-10-17"

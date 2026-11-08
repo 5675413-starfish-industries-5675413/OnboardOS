@@ -1,3 +1,5 @@
+> **Archived on 2026-11-08.** This file is an early planning note. It is not a description of the running product. The current overview is [the project README](../../README.md). The implemented AWS resources are in `infrastructure/template.yaml`.
+
 # 10 — GitHub issues, ownership, dependency order, and timeboxes
 
 Prefix issue titles with `ONB-`. Assign owner and verify file ownership before dispatching coding agents. Timeboxes below are relative to authorized development start (H0) and are **priorities**, not guaranteed delivery estimates.

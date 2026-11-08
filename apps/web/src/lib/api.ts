@@ -14,11 +14,20 @@
 
 import type {
   AssignmentView,
+  CoachingDraftContent,
+  CoachingStudioResponse,
+  CoachingVersionDetail,
+  ListCoachingScenariosResponse,
+  PublishCoachingResponse,
+  SaveCoachingDraftResponse,
+  ValidateCoachingResponse,
   ClientAction,
   CreateAssignmentResponse,
   ListAssignableEmployeesResponse,
   IncidentConfig,
   IncidentReport,
+  ListCoworkerMessagesResponse,
+  PostCoworkerMessageResponse,
   MeResponse,
   ReviewBundle,
   ReviewDecision,
@@ -28,11 +37,19 @@ import type {
   TestRunResponse,
 } from "@onboardos/contracts";
 import {
+  CoachingStudioResponseSchema,
+  CoachingVersionDetailSchema,
+  ListCoachingScenariosResponseSchema,
+  PublishCoachingResponseSchema,
+  SaveCoachingDraftResponseSchema,
+  ValidateCoachingResponseSchema,
   CreateAssignmentResponseSchema,
   GetSessionResponseSchema,
   ListAssignableEmployeesResponseSchema,
   ListAssignmentsResponseSchema,
+  ListCoworkerMessagesResponseSchema,
   MeResponseSchema,
+  PostCoworkerMessageResponseSchema,
   ReviewBundleResponseSchema,
   SaveConfigResponseSchema,
   SessionActionResponseSchema,
@@ -251,4 +268,66 @@ export async function postReviewDecision(
       ...(text ? { feedback: text } : {}),
     })
   ).review;
+}
+
+// -- AI coworker ---------------------------------------------------------------
+
+/** The persisted conversation for a session, plus whether a new question can be asked right now. */
+export function fetchCoworker(sessionId: string): Promise<ListCoworkerMessagesResponse> {
+  return request("GET", `/v1/sessions/${seg(sessionId)}/messages`, ListCoworkerMessagesResponseSchema);
+}
+
+/**
+ * Ask the AI coworker one question. The body is exactly { message }: the model, the prompt, the role
+ * and everything else are decided by the server. Reuse `idempotencyKey` only to RETRY the same text
+ * after a lost response; a new question (or a deliberate retry after an error) needs a new key.
+ */
+export function sendCoworkerMessage(
+  sessionId: string,
+  message: string,
+  idempotencyKey: string,
+): Promise<PostCoworkerMessageResponse> {
+  return request(
+    "POST",
+    `/v1/sessions/${seg(sessionId)}/messages`,
+    PostCoworkerMessageResponseSchema,
+    { message },
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
+
+// -- manager coaching studio (milestone M1) -----------------------------------------------------------------
+// The organization comes from the URL and is authorized by the server against membership. Bodies carry only the
+// editable content and the revisions the editor was looking at: never an organization, role, owner, version number
+// to allocate, status or hash.
+
+const coachingPath = (orgId: string, scenarioId: string): string => `/v1/orgs/${seg(orgId)}/scenarios/${seg(scenarioId)}/coaching`;
+
+/** GET /v1/orgs/{orgId}/scenarios: the supported (executable) scenarios and this organization's coaching status. */
+export function listCoachingScenarios(orgId: string): Promise<ListCoachingScenariosResponse> {
+  return request("GET", `/v1/orgs/${seg(orgId)}/scenarios`, ListCoachingScenariosResponseSchema);
+}
+
+export function getCoachingStudio(orgId: string, scenarioId: string): Promise<CoachingStudioResponse> {
+  return request("GET", coachingPath(orgId, scenarioId), CoachingStudioResponseSchema);
+}
+
+/** Save the draft. `expectedRevision` is 0 for the first save, otherwise the revision the edit was based on. */
+export function saveCoachingDraft(orgId: string, scenarioId: string, expectedRevision: number, content: CoachingDraftContent): Promise<SaveCoachingDraftResponse> {
+  return request("PUT", `${coachingPath(orgId, scenarioId)}/draft`, SaveCoachingDraftResponseSchema, { expectedRevision, content });
+}
+
+/** Validate unsaved content and describe the behaviour it selects. Persists nothing; calls no model. */
+export function validateCoaching(orgId: string, scenarioId: string, content: CoachingDraftContent): Promise<ValidateCoachingResponse> {
+  return request("POST", `${coachingPath(orgId, scenarioId)}/validate`, ValidateCoachingResponseSchema, { content });
+}
+
+export function publishCoaching(orgId: string, scenarioId: string, draftRevision: number, expectedCurrentVersion: number): Promise<PublishCoachingResponse> {
+  return request("POST", `${coachingPath(orgId, scenarioId)}/publish`, PublishCoachingResponseSchema, { draftRevision, expectedCurrentVersion });
+}
+
+/** One published version, read-only. */
+export function getCoachingVersion(orgId: string, scenarioId: string, profileVersion: number): Promise<CoachingVersionDetail> {
+  return request("GET", `${coachingPath(orgId, scenarioId)}/versions/${profileVersion}`, CoachingVersionDetailSchema);
 }

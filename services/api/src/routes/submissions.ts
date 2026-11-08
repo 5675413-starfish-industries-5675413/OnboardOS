@@ -58,7 +58,7 @@ import { INTERNAL, loadOwnedSession, scenarioFor } from "./sessions.js";
 export const MAX_SUBMISSION_BODY_BYTES = 16_384;
 
 /** The header name API Gateway delivers (HTTP APIs lower-case request header names). */
-function idempotencyKey(event: APIGatewayProxyEventV2): string {
+export function idempotencyKey(event: APIGatewayProxyEventV2): string {
   const raw = event.headers?.["idempotency-key"] ?? event.headers?.["Idempotency-Key"];
   if (typeof raw !== "string" || !IDEMPOTENCY_KEY_PATTERN.test(raw)) {
     throw new HttpError(400, "INVALID_REQUEST", "An Idempotency-Key header of 8-64 letters, digits, '-' or '_' is required");

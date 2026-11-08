@@ -26,6 +26,25 @@ export const config = {
     // Tolerate a trailing slash so `${apiBaseUrl}/v1/me` never contains "//".
     return env("VITE_API_BASE_URL").replace(/\/+$/, "");
   },
+  /**
+   * Feature flag for the AI coworker panel. OFF unless set to exactly "true" (any case).
+   *
+   * The frontend deploys from Git on merge; the API routes it calls deploy separately with SAM. Without a flag,
+   * a merge made before the backend is ready would show a panel whose requests fail. Turn this on only after the
+   * stack has been updated AND the stack parameter CoworkerModelId is set. It is read at build time, so changing
+   * it needs a redeploy of the frontend. It is a convenience, not a control: the API enforces everything itself.
+   */
+  get coworkerEnabled(): boolean {
+    return env("VITE_COWORKER_ENABLED").toLowerCase() === "true";
+  },
+  /**
+   * Feature flag for the manager Coaching Studio (milestone M1). OFF unless set to exactly "true" (any case).
+   * Same reason as the coworker flag: the frontend deploys from Git on merge, the routes it calls deploy separately
+   * with SAM. Build-time; a convenience, not a control (the API authorizes every call).
+   */
+  get coachingStudioEnabled(): boolean {
+    return env("VITE_COACHING_STUDIO_ENABLED").toLowerCase() === "true";
+  },
   cognito: {
     get userPoolId(): string {
       return env("VITE_COGNITO_USER_POOL_ID");

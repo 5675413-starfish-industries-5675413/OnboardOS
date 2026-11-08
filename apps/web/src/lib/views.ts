@@ -9,6 +9,8 @@
 
 import type {
   AssignmentStatus,
+  CoworkerState,
+  CoworkerTurnView,
   AssignmentView,
   ClientAction,
   IncidentReport,
@@ -18,6 +20,7 @@ import type {
   TestRunView,
 } from "@onboardos/contracts";
 import {
+  COWORKER_MAX_MESSAGE_CHARS,
   FEEDBACK_MAX,
   FEEDBACK_MIN,
   REPORT_FIELD_MAX,
@@ -81,6 +84,8 @@ export function describeApiError(err: unknown): string {
     case 403: return "You do not have permission to do that.";
     case 404: return "That item was not found, or you do not have access to it.";
     case 409:
+      if (err.code === "COWORKER_BUSY") return "Your coworker is still answering the last question. Wait for the answer, then ask again.";
+      if (err.code === "SESSION_NOT_OPEN") return "This attempt has been submitted, so the AI coworker can no longer be asked anything new.";
       if (err.code === "EVIDENCE_MISMATCH") return "The test result you were looking at is no longer the current one. It has been reloaded; review it and submit again.";
       if (err.code === "ALREADY_SUBMITTED") return "This attempt has already been submitted.";
       if (err.code === "ALREADY_DECIDED") return "A decision has already been recorded for this submission. It cannot be changed.";
@@ -93,9 +98,13 @@ export function describeApiError(err: unknown): string {
         : "That could not be completed because something changed. Please refresh.";
     case 422: return err.message || "That action is not allowed right now.";
     case 429:
+      if (err.code === "COWORKER_LIMIT_REACHED") return "You have used your AI coworker allowance for this session.";
       if (err.code === "RUN_LIMIT_REACHED") return "This session has reached its maximum number of test runs.";
       if (err.code === "REVISION_LIMIT_REACHED") return "This session has reached its maximum number of saved revisions.";
       return "This session has reached its action limit.";
+    case 503:
+      if (err.code === "AI_UNAVAILABLE") return "The AI coworker is not available right now.";
+      return "The server could not complete the request. Please try again.";
     default: return "The server could not complete the request. Please try again.";
   }
 }
@@ -259,4 +268,53 @@ export function validateDecision(decision: ReviewDecision | "", feedback: string
     return { ok: false, message: `Write at least ${FEEDBACK_MIN} characters telling the employee what to change.` };
   }
   return { ok: true };
+}
+
+// -- AI coworker (presentation and retry rules; the server is the authority) ---------
+
+export type CoworkerMessageCheck = { ok: true; text: string } | { ok: false; message: string };
+
+export function validateCoworkerMessage(draft: string): CoworkerMessageCheck {
+  const text = draft.trim();
+  if (text.length === 0) return { ok: false, message: "Type a question first." };
+  if (text.length > COWORKER_MAX_MESSAGE_CHARS) {
+    return { ok: false, message: `Keep it under ${COWORKER_MAX_MESSAGE_CHARS} characters (it is ${text.length}).` };
+  }
+  return { ok: true, text };
+}
+
+export interface SendKey {
+  text: string;
+  key: string;
+}
+
+/**
+ * Which Idempotency-Key to use for this send. The SAME text keeps the SAME key while we do not know
+ * whether the server saw it (lost response, timeout), so a retry can never create a second turn. A
+ * different text, or no previous attempt, mints a new key.
+ */
+export function resolveSendKey(previous: SendKey | null, text: string, mint: () => string): SendKey {
+  return previous && previous.text === text ? previous : { text, key: mint() };
+}
+
+/**
+ * Keep the key only when the outcome is unknown (no response, or a server fault). Any definitive answer
+ * - a stored turn (even an ERROR one) or a clear rejection - ends that request, so the next send is new.
+ */
+export function keepKeyAfter(err: unknown): boolean {
+  return err instanceof ApiError && (err.status === 0 || err.status >= 500);
+}
+
+export function hasPendingTurn(turns: readonly Pick<CoworkerTurnView, "status">[]): boolean {
+  return turns.some((t) => t.status === "PENDING");
+}
+
+/** Insert or replace a turn by id, keeping creation order (turn ids sort by time). */
+export function mergeTurn(turns: readonly CoworkerTurnView[], incoming: CoworkerTurnView): CoworkerTurnView[] {
+  return [...turns.filter((t) => t.turnId !== incoming.turnId), incoming].sort((a, b) => a.turnId.localeCompare(b.turnId));
+}
+
+/** The input and button are disabled while a request is in flight, or whenever the server says a question cannot be accepted. */
+export function coworkerInputDisabled(state: Pick<CoworkerState, "canSend"> | null, sending: boolean): boolean {
+  return sending || !state?.canSend;
 }

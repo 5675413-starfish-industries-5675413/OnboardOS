@@ -14,6 +14,7 @@ import { runnerHandler } from "@onboardos/test-runner";
 import { handleRequest } from "../handler.js";
 import type { ApiDeps } from "../deps.js";
 import type { RunnerClient, RunnerInvocation } from "../runner.js";
+import type { BedrockProvider, CoworkerReply, CoworkerRequest } from "../bedrock.js";
 import { FakeDynamo } from "./fakeDynamo.js";
 
 export const CORE = "test-core";
@@ -84,8 +85,43 @@ export function inProcessRunner(): RunnerClient {
   };
 }
 
+/** TEST-ONLY model provider. Never makes a network call; records every request it is asked to send. */
+export interface FakeCoworker extends BedrockProvider {
+  calls: CoworkerRequest[];
+  /** Replace what the next calls do. */
+  behave: (fn: (req: CoworkerRequest, n: number) => Promise<CoworkerReply>) => void;
+}
+
+export const COWORKER_MODEL = "amazon.nova-micro-v1:0";
+
+export function replyOf(text: string, over: Partial<CoworkerReply> = {}): CoworkerReply {
+  return {
+    text, modelId: COWORKER_MODEL, inputTokens: 120, outputTokens: 30, requestId: "bedrock-req-1",
+    stopReason: "end_turn", latencyMs: 210, truncated: false, ...over,
+  };
+}
+
+export function fakeCoworker(): FakeCoworker {
+  let behavior: (req: CoworkerRequest, n: number) => Promise<CoworkerReply> = async (_r, n) =>
+    replyOf(`Fake coworker reply ${n}: compare the upstream latency with the timeout.`, { requestId: `bedrock-req-${n}` });
+  const calls: CoworkerRequest[] = [];
+  return {
+    modelId: COWORKER_MODEL,
+    calls,
+    behave: (fn) => { behavior = fn; },
+    converse: async (req) => {
+      calls.push(structuredClone(req));
+      return behavior(req, calls.length);
+    },
+  };
+}
+
 export interface Api {
   db: FakeDynamo;
+  /** The fake model provider currently installed (null when the feature is disabled). */
+  coworker: FakeCoworker | null;
+  /** Install a provider, or null to model a deployment with no model configured. */
+  useCoworker: (p: FakeCoworker | null) => void;
   deps: ApiDeps;
   /** Every request the API sent to the runner (after being recorded, delegated to the active runner). */
   runnerCalls: RunnerRequest[];
@@ -129,10 +165,14 @@ export function createApi(existing?: FakeDynamo, runnerImpl?: RunnerClient): Api
   let clock = Date.parse("2026-11-07T10:00:00.000Z");
   let active: RunnerClient = runnerImpl ?? inProcessRunner();
   let broken = false;
+  let cow: FakeCoworker | null = fakeCoworker();
+  let idCounter = 0;
   const runnerCalls: RunnerRequest[] = [];
   const deps: ApiDeps = {
     db: { client: db as unknown as ApiDeps["db"]["client"], coreTable: CORE, eventsTable: EVENTS },
     now: () => new Date(clock).toISOString(),
+    coworker: () => cow,
+    newId: () => (++idCounter).toString(16).padStart(12, "0"),
     runner: () => {
       if (broken) throw new Error("ONBOARDOS_RUNNER_FUNCTION_NAME must be set");
       return {
@@ -153,9 +193,11 @@ export function createApi(existing?: FakeDynamo, runnerImpl?: RunnerClient): Api
   });
 
   let n = 0;
-  return {
+  const api: Api = {
     db,
     deps,
+    get coworker() { return cow; },
+    useCoworker: (p) => { cow = p; },
     runnerCalls,
     useRunner: (c) => { active = c; },
     breakRunnerConfig: () => { broken = true; },
@@ -191,10 +233,13 @@ export function createApi(existing?: FakeDynamo, runnerImpl?: RunnerClient): Api
       return { status: out.statusCode, body: out.body ? JSON.parse(out.body) : undefined, headers: out.headers, raw: out.body };
     },
   };
+  return api;
 }
 
 // -- route shortcuts ----------------------------------------------------------
 export const R = {
+  messages: "GET /v1/sessions/{sessionId}/messages",
+  ask: "POST /v1/sessions/{sessionId}/messages",
   employees: "GET /v1/orgs/{orgId}/assignable-employees",
   list: "GET /v1/orgs/{orgId}/assignments",
   create: "POST /v1/orgs/{orgId}/assignments",
@@ -207,6 +252,12 @@ export const R = {
   submit: "POST /v1/sessions/{sessionId}/submissions",
   review: "GET /v1/reviews/{submissionId}",
   decide: "POST /v1/reviews/{submissionId}/decision",
+  coachScenarios: "GET /v1/orgs/{orgId}/scenarios",
+  coachStudio: "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching",
+  coachSave: "PUT /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/draft",
+  coachValidate: "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/validate",
+  coachPublish: "POST /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/publish",
+  coachVersion: "GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching/versions/{profileVersion}",
 } as const;
 
 export const assign = (api: Api, by: Person, employee: Person, org = ORG) =>
@@ -328,3 +379,35 @@ export async function finishAttempt(api: Api, who: Person, sessionId: string, ms
   if (sub.status !== 201) throw new Error(`submit failed: ${sub.status} ${sub.raw}`);
   return sub.body.submission.submissionId as string;
 }
+
+// -- Phase 4 helpers ------------------------------------------------------------
+
+export const askCoworker = (api: Api, who: Person | string, sessionId: string, message: unknown, key: string | null = newKey()) =>
+  api.call({
+    route: R.ask,
+    as: who,
+    params: { sessionId },
+    body: { message },
+    headers: key === null ? {} : { "idempotency-key": key },
+  });
+
+export const listCoworker = (api: Api, who: Person | string, sessionId: string) =>
+  api.call({ route: R.messages, as: who, params: { sessionId } });
+
+/** Assign and start a session for an employee; no tests run. */
+export async function startedFor(api: Api, employee: Person = PEOPLE.empA, manager: Person = PEOPLE.mgrA, org = ORG) {
+  const a = await assign(api, manager, employee, org);
+  const assignmentId: string = a.body.assignment.assignmentId;
+  const s = await startAs(api, employee, assignmentId);
+  return { assignmentId, sessionId: s.body.session.sessionId as string, session: s.body.session };
+}
+
+/**
+ * What the employee actually typed, as the model received it. Since coworker v3 the final user turn carries a platform reminder
+ * after the employee's text; tests that compare the employee's words strip it here.
+ */
+export const REMINDER_MARK = "\n\n[Platform reminder, not written by the employee]";
+export const employeeTurn = (text: string): string => (text.includes(REMINDER_MARK) ? text.slice(0, text.indexOf(REMINDER_MARK)) : text);
+/** A request's messages with the platform reminder removed from the last (employee) turn. */
+export const visibleMessages = (req: { messages: ReadonlyArray<{ role: string; text: string }> }) =>
+  req.messages.map((m, i) => (i === req.messages.length - 1 ? { ...m, text: employeeTurn(m.text) } : m));

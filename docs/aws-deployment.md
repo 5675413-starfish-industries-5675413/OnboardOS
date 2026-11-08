@@ -1119,3 +1119,283 @@ Read-only data check (after step 2): `aws dynamodb query --table-name <CoreTable
 
 Redeploy the Phase 2C template through the same gate: removes the three routes/permissions and `EventsRead`. Submissions, decisions, ledger entries and the extra state fields stay in the Core table, ignored by Phase 2C code
 (which cannot write `SUBMITTED` sessions or read these items). An assignment left in `AWAITING_REVIEW`/`APPROVED`/`REVISION_REQUESTED` would be shown by the older UI as its raw status and could not be started. `sam delete` is not a rollback: it deletes the tables.
+
+---
+
+## Phase 4: AI coworker on Amazon Bedrock
+
+**Status: built and verified LOCALLY only. Not committed, not deployed, NOT verified end-to-end on AWS.** The only real Bedrock call made in this project
+so far is the Phase 0 smoke test (`amazon.nova-micro-v1:0`, `us-east-1`, Converse, as the Workshop participant role: reply `ready`, 7 input / 2 output tokens,
+`end_turn`, 228 ms). It did **not** run as the API Lambda's role. Every automated test uses a fake provider; none of them proves a deployed call.
+
+An employee asks the coworker about the incident they were assigned, gets a Bedrock-written answer, and finds the same conversation after a refresh.
+The coworker is **advisory text**: it has no tools and cannot run tests, edit configuration, submit, approve or change anything.
+
+### Routes (JWT-protected; session ownership re-checked on every call)
+
+| Route | Body | Result |
+|---|---|---|
+| `GET /v1/sessions/{sessionId}/messages` | none | `{ turns[], coworker{ enabled, canSend, reason, modelId, completedTurns, attemptsUsed, limits } }`. Also closes an abandoned reservation. Readable after submission. |
+| `POST /v1/sessions/{sessionId}/messages` | header `Idempotency-Key` (8-64 of `A-Za-z0-9_-`); `{ "message": "<1-600 chars>" }` (strict) | `201 { turn, coworker, created:true }`; `200 ... created:false` for an identical retry; the turn is `COMPLETE`, or `ERROR` with a fixed message when the provider failed. |
+
+Errors: `400` shape/length/forged field; `404` not your session (opaque, same for every non-owner); `409 COWORKER_BUSY` (one in flight), `409 IDEMPOTENCY_CONFLICT`
+(same key, different text), `409 SESSION_NOT_OPEN` (attempt submitted); `429 COWORKER_LIMIT_REACHED`; `503 AI_UNAVAILABLE` (no model configured).
+The request cannot carry a model, role, organization, prompt, session status, test result or credentials: any extra field is a `400`.
+A turn exposes only `turnId, status, userText, reply, truncated, modelId, createdAt, completedAt, errorCode, errorMessage`. Token counts, the Bedrock request id, stop reason and
+latency are stored on the turn for audit and **never** returned to the browser.
+
+### What the model is told (`coworkerContext.ts`, pure)
+
+Built on the server, after `loadOwnedSession`, from records the server loaded: the employee-visible scenario (ticket, runbook, **synthetic** diagnostics, labelled as such), which items were
+opened, the current saved configuration, the newest finished test result **for the current configuration** (the same neutral case names and PASS/FAIL the employee already sees), and the last 6 completed
+turns. It is handed no suite id, thresholds, rubric, manager decision, subject id, email, other user's data or credentials: the function has no parameter that could carry them.
+Employee text and scenario text are fenced as data, fence characters are neutralized, and the instructions say the data is not instructions. Prompt version `coworker-v1` is stored on every turn.
+The model may explain and ask questions; it is told it cannot run or predict tests, act in AWS, or see hidden material.
+
+### Persistence and the one-paid-call rule (Core table; no new table)
+
+| Key (all under `SESSION#<id>`) | Item |
+|---|---|
+| `CHAT#CTL` | control: revision `ctlRev`, lock holder `ctlActive`, `ctlLease`, `ctlAttempts`, `ctlCompleted` |
+| `CHAT#MSG#turn_<13-digit ms>_<12 hex>` | one turn (opaque, sortable by creation time) |
+| `CHAT#IDEM#<key>` | idempotency ledger: request hash + turn id |
+
+These cannot collide with `STATE`, `CONFIG#`, `TEST#`, `IDEM#SUBMIT#`, events or submissions (a test asserts it).
+A reservation is ONE `TransactWriteItems`: `ConditionCheck` on `STATE` (still `INVESTIGATING` and still this employee's) + the control item moved to the new holder with incremented
+counters, **conditional on the revision just read** (or on not existing, the first time) + closing a previous holder's expired turn as `STRANDED` + the new `PENDING` turn
+(create-only) + the ledger entry (create-only). Only the request whose transaction commits calls Bedrock, once, outside the transaction (`maxAttempts: 1`, 20 s abort). Completion is a second conditional
+transaction: the turn must still be `PENDING` and the lock must still belong to this turn, so a late result after a takeover is discarded and cannot overwrite the closed turn or free someone else's lock.
+
+* Limits: 600 characters per message, 20 successful turns, 30 total attempts (errors count), one in flight, 6 turns of history, 400 output tokens, reply capped at 2000 characters.
+* Same key + same text returns the stored turn with **no** new model call (also while it is `PENDING`, and for an `ERROR` turn). Same key + different text is `409`. A deliberate retry after an error uses a **new** key.
+* A reservation not finished within 60 s is closed as `STRANDED` by the next read or question.
+* Chat is **not** scenario state: it never writes `STATE`, never changes `stateVersion`, writes no Events, and is unaffected by the 200-action cap. New messages are accepted only while the attempt is `INVESTIGATING`; history stays readable after submission.
+
+**Not guaranteed:** exactly-once billing. If Bedrock accepts and processes a request but the connection drops before we hear back, the service may have billed a call that we record as `ERROR`; the user then asks again with a new key.
+If the answer cannot be stored after a successful call, the turn stays `PENDING` until the lease closes it as `STRANDED` and that answer is lost (not shown, not invented).
+
+**Consequence for evidence:** frozen submissions do not include chat and are unchanged. A later phase can add an optional field to *new* submissions (counts, model id, first/last time, a digest of the ordered turns, not the text); old submissions
+would read "not recorded", never "none" (ADR-038).
+
+### Infrastructure changes (additive; the coworker is OFF by default)
+
+| Change | Detail |
+|---|---|
+| Parameter `CoworkerModelId` | default `""`; `AllowedValues`: `""` or `amazon.nova-micro-v1:0` only |
+| Condition `HasCoworkerModel` | parameter is not empty |
+| API function env | `ONBOARDOS_COWORKER_MODEL_ID: !Ref CoworkerModelId` |
+| Routes | `GET` and `POST /v1/sessions/{sessionId}/messages`, both behind the JWT authorizer (CORS already allows `Idempotency-Key`) |
+| API role policy `OnboardOSApiCoworker` | **only when the parameter is non-empty** (`Fn::If` ... `AWS::NoValue`): `bedrock:InvokeModel` on `arn:aws:bedrock:${AWS::Region}::foundation-model/${CoworkerModelId}` (one action, one resource) and `dynamodb:ConditionCheckItem` on the Core table ARN |
+| Unchanged | the three existing API role policies (verified byte-identical in the translated output), both tables, Cognito, the runner function and role, the smoke function, the Outputs, the Vercel configuration |
+
+`dynamodb:ConditionCheckItem` is the one grant that is not Bedrock: `TransactWriteItems` authorizes a `ConditionCheck` by that action, and the reservation uses one on `STATE` so it can verify the session is still open without writing it.
+It is created only with the coworker policy, and a template test asserts it appears once, on the Core table. If it were missing the symptom would be `500` on every `POST` (the first thing to look for in the live check).
+
+CloudFormation diff against `main` (SAM translator; **not** a change set, so replacement behaviour is unverified): **Added** `OnboardOSApiFunctionApi{ListCoworkerMessages,SendCoworkerMessage}Permission`;
+**Modified in place** `OnboardOSApiFunction` (one environment variable), `OnboardOSApiRole` (one conditional policy), `OnboardOSHttpApi` (OpenAPI body: one path with GET and POST); no resource removed; Outputs unchanged.
+
+### Deployment commands (PREPARED, NOT EXECUTED)
+
+Deploy in two steps so infrastructure and behaviour change separately. Use the same stack, region and parameters as the last deployment (check `aws cloudformation describe-stacks --stack-name onboardos-dev --query 'Stacks[0].Parameters'` first and pass those values explicitly).
+
+```bash
+# 0. Local gate on the exact commit being deployed
+npm ci && npm run verify
+sam validate --template-file infrastructure/template.yaml --lint
+
+# 1. Build, then create a change set WITHOUT executing it (coworker stays OFF: CoworkerModelId="")
+sam build --template-file infrastructure/template.yaml --build-in-source
+sam deploy --stack-name onboardos-dev --region us-east-1 --resolve-s3 --capabilities CAPABILITY_IAM \
+  --no-execute-changeset --no-confirm-changeset --no-fail-on-empty-changeset \
+  --parameter-overrides LogRetentionDays=<current> DemoOrgId=<current> CoworkerModelId=""   # add the other current parameter values
+
+# 2. Review the change set (see "Expected change set"), then, only after approval:
+aws cloudformation describe-change-set --stack-name onboardos-dev --region us-east-1 --change-set-name <name> \
+  --query 'Changes[].ResourceChange.[Action,LogicalResourceId,ResourceType,Replacement]' --output table
+aws cloudformation execute-change-set --stack-name onboardos-dev --region us-east-1 --change-set-name <name>
+
+# 3. Turn the coworker ON as a second, separate change set (adds the Bedrock policy), reviewed the same way
+sam deploy ... --no-execute-changeset ... --parameter-overrides ... CoworkerModelId="amazon.nova-micro-v1:0"
+```
+
+**Expected change set, step 1 (feature OFF):** `Add` `OnboardOSApiFunctionApiListCoworkerMessagesPermission` and `OnboardOSApiFunctionApiSendCoworkerMessagePermission`;
+`Modify`, `Replacement: False`: `OnboardOSApiFunction`, `OnboardOSHttpApi`, and `OnboardOSApiRole` **only if CloudFormation counts the removed-by-condition policy as a change** (with the feature off the role's policies are identical to today).
+**Step 3 (feature ON):** `Modify`, `Replacement: False`: `OnboardOSApiFunction` (env value), `OnboardOSApiRole` (adds `OnboardOSApiCoworker`).
+**STOP** if the change set shows any `Remove`, any `Replacement` of `True`/`Conditional`, or touches either table, Cognito, the runner function or role, or the smoke function. Roles are unnamed, so `CAPABILITY_IAM` is sufficient.
+Do not run `sam deploy` without `--no-execute-changeset` for this change.
+
+### Live verification (NOT RUN; every row must pass before calling this verified on AWS)
+
+| # | As | Action | Expected |
+|---|---|---|---|
+| 1 | employee | open a session with the stack deployed but the coworker OFF | panel says the AI coworker is not available; the input is disabled; nothing simulated |
+| 2 | operator | step 3 (ON). Employee reloads | panel shows `amazon.nova-micro-v1:0` and is enabled |
+| 3 | employee | ask "What should I check first?" | an answer within a few seconds, labelled "AI coworker · amazon.nova-micro-v1:0" (this is the first proof that the **API Lambda's role** can invoke the model) |
+| 4 | operator | CloudWatch, API log group | one `coworker_turn` line with `status:"COMPLETE"`, a Bedrock `requestId`, token counts, **no** question or answer text |
+| 5 | employee | refresh the page | same conversation |
+| 6 | employee | ask while the previous answer is pending (two tabs) | the second gets "still answering" (409); only one `coworker_turn` line |
+| 7 | employee | repeat a request with the same `Idempotency-Key` (DevTools) | `200`, `created:false`, no new log line |
+| 8 | employee | Save config, run tests, then ask "did my change work?" | the answer is consistent with the shown test result and does not claim to have run anything |
+| 9 | employee | submit the report, then reopen the session | history visible, input disabled with the read-only reason; `POST` returns `409` |
+| 10 | curl, another employee / manager / admin | `GET`/`POST .../messages` on that session | `404` |
+| 11 | curl, no token | the same | `401` from API Gateway |
+| 12 | operator | set `CoworkerModelId=""` again | panel returns to unavailable; history still readable |
+| 13 | browser | the existing workflow: assign, investigate, save, run tests, submit, review | unchanged |
+
+If row 3 returns an `ERROR` turn, read the stored `errorCode` / the log's error name: `AI_UNAVAILABLE` points at IAM (`bedrock:InvokeModel`), the model id, or an SCP; the `500` described above points at `ConditionCheckItem`.
+
+### Known limitations (Phase 4)
+
+| # | Limitation | Impact |
+|---|---|---|
+| 1 | **No deployed check has run** | the Lambda role's Bedrock permission, `ConditionCheckItem`, the empty-string environment variable and the UI are untested on AWS |
+| 2 | Billing is at-least-once under network ambiguity | see above; capped at 30 attempts per session |
+| 3 | Synchronous: the POST waits for the model (up to 20 s) | a slow model means a slow request; the page shows a waiting state and polls if the response is lost |
+| 4 | No streaming | the answer appears whole |
+| 5 | A completed answer that cannot be stored is lost | the turn closes as `STRANDED` after 60 s |
+| 6 | Model answers can be wrong | the panel says so; they never feed evidence or decisions |
+| 7 | Chat is not in the frozen evidence | managers cannot see it (deliberate; ADR-038) |
+| 8 | The React panel has no DOM-level tests | request shapes, rules and the rendering of a turn (server-rendered, so escaping is checked) are tested; **manual browser verification matters** |
+| 9 | One model, one prompt version, English only | `coworker-v1` |
+| 10 | Local tooling: the SAM build step removes `@types/aws-lambda` from `node_modules`, so a second consecutive `npm run verify` needs `npm ci` | unaffected CI / fresh clone |
+
+### Rollback
+
+Fastest: redeploy with `CoworkerModelId=""` (removes the Bedrock policy; the API then answers `503 AI_UNAVAILABLE` and the panel says so). Full: redeploy the previous template through the same gate (removes the two routes and permissions).
+Stored `CHAT#` items are ignored by older code and harmless. `sam delete` is not a rollback: it deletes the tables.
+
+### Release coordination: frontend and backend deploy separately (Phase 4)
+
+* **Vercel** builds the SPA from Git (`vercel.json` only adds an SPA rewrite). **SAM** deploys the API and is run by hand. Merging this branch to `main` therefore ships the new web code to production *before* the two `/messages` routes exist.
+* The panel is behind **`VITE_COWORKER_ENABLED`** (build-time, default OFF; only the value `true`, any case, enables it). With it unset the merged frontend renders no coworker UI and makes no `/messages` request, so a merge that runs ahead of the stack is harmless. Nothing else in this branch changes how the web app talks to the existing API (`SessionView` and every existing request are unchanged).
+* **Order:** (1) merge to `main` (frontend deploys, panel hidden); (2) deploy the stack with `CoworkerModelId=""` and verify the existing workflow; (3) deploy again with `CoworkerModelId="amazon.nova-micro-v1:0"` and verify `GET`/`POST` with a token; (4) set `VITE_COWORKER_ENABLED=true` in Vercel and redeploy the frontend; (5) run the live checks below. The reverse order of (3) and (4) would show a panel reporting "not available" (harmless, honest) or, before (2), failing requests.
+* Rollback in either direction is independent: unset the Vercel variable and redeploy to hide the panel; set `CoworkerModelId=""` to turn the backend off.
+
+### Release audit notes (Phase 4)
+
+| Area | Finding |
+|---|---|
+| Reservation atomicity, IAM | One `TransactWriteItems` (ConditionCheck on `STATE` + control item at a read revision + turn + ledger [+ stranded close]); no two actions target one item (AWS forbids ConditionCheck and Update on the same item). The `ConditionCheck` is authorized by `dynamodb:ConditionCheckItem`, which the conditional policy grants on the Core table only. No code path needs it when the coworker is disabled (POST answers `503` before any transaction; GET and stranded reconciliation use only `UpdateItem`). |
+| Concurrency | Same key and different keys, five-way races, takeover races, quota races and late completions are covered by tests; the fake DynamoDB now also rejects unused expression placeholders, as real DynamoDB does. **The fake proves the logic, not AWS behaviour:** the first deployed run is the real check. |
+| Submit while an answer is pending | Allowed: chat holds no lock on scenario state. The answer is recorded, the frozen submission and `STATE` are untouched, and later messages get `409 SESSION_NOT_OPEN`. **Defect found and fixed:** the POST response used the phase read *before* the model call, so it could report `canSend: true` after a mid-answer submission; it now reads the phase when responding. |
+| Timeouts | Bedrock abort 20 s, SDK request timeout 20 s, Lambda 29 s (inherited), API Gateway 30 s, lease 60 s. The Bedrock SDK client uses an HTTP/2 handler: the timeout is verified on the resolved handler configuration, `connectionTimeout` (an HTTP/1 option that would be ignored) was removed and the SDK default `disableConcurrentStreams` restated. A connection reused after a Lambda freeze could fail its first call; that is recorded as an `ERROR` turn and the user asks again (no automatic retry by design). |
+| Isolation | Ledger, control and turns are keyed by session; every read re-parses and re-checks `sessionId`; the model input has no parameter for another user's data. |
+| Frontend | No SDK, model id, prompt or suite text in the browser source or the built bundle (tests and a bundle scan). |
+
+## Milestone M1: manager Coaching Studio (PREPARED LOCALLY, NOT DEPLOYED)
+
+Branch `feat/manager-coaching-studio`, on top of the committed coworker-v2 checkpoint `e4f634c`. Nothing here has been deployed, pushed or run against live AWS.
+
+### Routes (all JWT-protected; the Lambda then requires an ACTIVE manager or org_admin membership in the URL's organization)
+| Route | Purpose |
+|---|---|
+| `GET /v1/orgs/{orgId}/scenarios` | Supported (executable) scenarios and this organization's coaching status |
+| `GET /v1/orgs/{orgId}/scenarios/{scenarioId}/coaching` | Template, draft, published versions, current version |
+| `PUT .../coaching/draft` | Save the draft; body `{expectedRevision, content}`; stale revision => 409 |
+| `POST .../coaching/validate` | Validate unsaved content and describe the behaviour; persists nothing, calls no model |
+| `POST .../coaching/publish` | Publish an immutable version; body `{draftRevision, expectedCurrentVersion}` |
+| `GET .../coaching/versions/{profileVersion}` | Inspect one published version (read only) |
+`POST /v1/orgs/{orgId}/assignments` gains an optional `coachingProfileVersion`; assignment views gain `coaching` (managers only).
+
+### Records (existing Core table, organization partition; no new table, index, or IAM action)
+`ORG#<org>` with sort keys `COACHDRAFT#<scenario>#v<scenarioVersion>`, `COACHPUB#<scenario>#v<scenarioVersion>#<profileVersion>`, `COACHCUR#<scenario>#v<scenarioVersion>`. Assignment items gain an optional `coachingRef {source, profileId, profileVersion, contentHash}`; chat turns record `coachingProfileSource: ORG_PUBLISHED` when applicable.
+
+### Infrastructure delta
+Six API routes (template.yaml) and nothing else. The API role already grants Get/Put/Update/Query on the Core table; publishing needs no `ConditionCheckItem` (the draft is stamped with a conditional Update instead). `DeleteItem` stays ungranted, so a published version cannot be deleted by the API.
+
+### Deployment order and flags
+1. Deploy the stack (routes + API code). Behaviour of existing assignments and sessions is unchanged: no `coachingRef` means built-in coaching.
+2. Only then build the frontend with `VITE_COACHING_STUDIO_ENABLED=true` (build-time, default OFF), so a Git-triggered frontend deploy cannot show screens whose routes do not exist yet.
+
+### Not verified on AWS
+Every row of the live verification list is NOT RUN: real Cognito login as a manager, DynamoDB transaction semantics for publish (the fake DynamoDB implements the conditions the code uses; a real table has not been exercised), CORS for the new PUT path, and a real coworker question under a published profile.
+
+### M1 hardening notes (local review, still NOT deployed)
+- **Publish cancellation reasons** are mapped, not guessed: `TransactionConflict` => 409 `TRY_AGAIN` (nothing written, retry), `ThrottlingError`/`ProvisionedThroughputExceeded` => 503 `BUSY`, a failed pointer condition => 409 `VERSION_CONFLICT`, a failed draft condition => 409 `REVISION_CONFLICT`, anything else => 500. A transaction is all-or-nothing, so a cancelled publish leaves nothing behind.
+- **Inconsistent stored state fails closed** (500 plus a `COACHING_STATE_INCONSISTENT` log with a fixed reason, never overwriting): a pointer whose target version is unusable, or a next version number that already exists while the pointer says otherwise.
+- **Reads** of coaching records (Get and Query) are all strongly consistent reads of the base table; none uses an index.
+- **DynamoDB reserved words**: no expression uses one as a bare attribute name (checked against the AWS list in a test, because the in-memory fake cannot).
+- **Bundle evidence** (real `sam build`, compared with the coworker-v2 checkpoint `e4f634c`, whose runner and smoke bundles equal the deployed code): API changed; Smoke byte-identical; ScenarioRunner changed only by inert Zod schema definitions from the shared contracts package (a new `coachingStudio.ts` section and two optional fields on the assignment schemas), with the suite and handler logic byte-identical. Web bundle gains the feature-flagged Studio screens and contains no model id, prompt, suite id or evaluator text.
+- **Future change set should touch**: `OnboardOSApiFunction` (code), `OnboardOSScenarioRunner` (code only, no behaviour change), six `AWS::Serverless::Function` HttpApi events (and the API Gateway routes/integration they create), and nothing else. It should show NO change to tables, indexes, IAM roles/policies, Cognito, the smoke function, parameters or outputs. Any other resource in the change set is a stop-and-ask.
+
+### M1 live verification plan (DESIGN ONLY: nothing below has been run, and no identity or record has been created)
+**Why a fresh employee is needed.** Both Northstar employees already have INC-104 assigned. Assignment ids are deterministic per (organization, scenario version, employee), so assigning again returns the existing assignment unchanged, which is correct and cannot demonstrate pinning.
+
+| Option | What it touches | Verdict |
+|---|---|---|
+| A. One new employee in `northstar-cloud` (for example `employee3@northstar-demo.example`, team `cloud-team-1`) | One new Cognito user and one new membership item (create-if-absent via the existing seed script). New assignment, session and chat items for that user. Plus the coaching items the test publishes. No existing item is written. | **Recommended**: smallest, tests the real path (Cognito, JWT, DynamoDB, Bedrock). |
+| B. A separate test organization | Needs new accounts too (a Cognito user is global), a second membership for the manager (the UI uses the first membership), changes to the seed script (it checks `DemoOrgId`), and an org record. | Larger and ambiguous in the UI; rejected for now. |
+| C. A disposable second stack | New tables, Cognito pool, API, hosted UI domain, callbacks, seed, frontend env. | Cleanest isolation and permits cleanup by deleting the stack; most work. Use if you want zero writes to the live organization. |
+
+**Side effects of A to accept knowingly.** Published coaching versions cannot be deleted through the API (no `DeleteItem`). After the test, `northstar-cloud` has a current published coaching version, so any NEW assignment there is pinned to it. Write realistic content you are happy to keep, or have an operator with admin credentials remove the `COACH*` items afterwards. The new employee will show the same display name as the existing ones ("employee"); the manager picks the dropdown option whose button does not read "Already assigned".
+
+**Prerequisites.** (1) Review and approve a prepare-only change set (API and runner code, six routes). (2) Deploy it, then confirm the API still serves existing sessions (legacy assignments use built-in coaching). (3) Build the frontend locally with `VITE_COACHING_STUDIO_ENABLED=true` and `VITE_COWORKER_ENABLED=true` against `http://localhost:5173` (no Vercel change needed). (4) A read-only snapshot of the existing assignments, sessions, events and test runs (counts and hashes) before and after.
+
+**Human approval points.** (a) Deploying the change set. (b) Creating the new Cognito identity and choosing its password at the hidden prompt. (c) The first publish of a live coaching version (permanent). (d) The first paid coworker question under the published profile.
+
+**Steps.** Manager signs in; opens Scenarios; saves a draft; validates; publishes v1; assigns INC-104 to the new employee (card says v1); new employee signs in in a separate browser profile, starts the investigation, asks one question; read-only checks confirm the turn records `ORG_PUBLISHED`, the profile id, version 1 and the hash, `stateVersion` unchanged by chat, and that the two original employees' assignment, session, review and test records are byte-identical to the snapshot. Then publish v2 and confirm the new employee's assignment still says v1 and a second question still uses v1.
+
+### Real DynamoDB integration test (DESIGN ONLY: not run)
+Purpose: execute the publish transaction, conditional updates and strongly consistent reads against a real table, which the in-memory fake cannot prove. Run it from a script with the operator's credentials (never from the API role), against the Core table, using only disposable keys: organization `it-<12 random hex>` and scenario `inc-104`, so every key is `ORG#it-<hex>` / `COACH...`. Cases: first draft create, stale update refused, first publish with no pointer, second publish with compare-and-set, an identical publish retry, two concurrent publishes (exactly one wins), a draft edited during a publish (cancelled with nothing written), and a pointer behind the versions (refused). Cleanup: the script lists the partition (`Query PK = ORG#it-<hex>`, bounded) and deletes exactly those items, printing the count, and refuses to delete any key not starting with `ORG#it-`. Verify the partition is empty afterwards. Needs `dynamodb:DeleteItem` for the operator, which the API role deliberately lacks.
+
+## Coworker v3 (PREPARED LOCALLY, NOT DEPLOYED, NOT EVALUATED AGAINST A MODEL)
+
+Branch `feat/coworker-v3-quality` (from the M1 commit `ba9a4fd`). See `docs/ai-coworker-architecture.md` section 8.
+
+### The existing M1 change set is stale and must not be executed
+Change set `samcli-deploy1794139934` on stack `onboardos-dev` was built from `ba9a4fd`, so it contains the coworker-v2 prompt and the M1 Studio, including the free-text notes behaviour that a real evaluation showed to be unsafe (the model obeyed a planted note). It is unexecuted and must stay so: do not execute it and do not delete it until a decision is recorded. After v3 is approved it must be REPLACED by a new change set built from the approved v3 commit, and only then deleted by the deployment owner. No new change set has been prepared.
+
+### Two different comparisons (do not confuse them)
+1. **Incremental code change, `ba9a4fd` (M1) to v3.** Only the API function code differs, plus inert shared-contract constants in the web bundle. This is the comparison in the table below. It says nothing about what a deployment changes in AWS.
+2. **Actual release change, the deployed `onboardos-dev` stack to M1 + v3.** This is what a change set built from the approved v3 commit will show, because M1 has never been deployed. The deployed stack still runs the earlier coworker code and has no coaching routes. The earlier statement that "a future change set should modify only the API function" was wrong for this reason.
+
+Incremental bundle comparison against `ba9a4fd` (real `sam build`):
+| Artifact | `ba9a4fd` | v3 working tree | Meaning |
+|---|---|---|---|
+| API function bundle | `2818009d2810` | `53d8c6e0878d` | Code change (v3 prompt, follow-up, verifier, notes rejection) |
+| Scenario runner bundle | `614664d077dc` | `614664d077dc` | Byte-identical to M1 |
+| Smoke bundle | `ddc0e860eeec` | `ddc0e860eeec` | Byte-identical |
+| `infrastructure/template.yaml` | | unchanged | No route, IAM, parameter, table or model change relative to M1 |
+
+(Hashes are of the committed v3 tree. Re-check them with `sam build` when the real change set is built.)
+
+### Acceptance criteria for the future M1 + v3 change set (deployed stack to the approved commit)
+The change set must be created from the approved v3 commit, reviewed with `describe-change-set`, and match this list. The currently existing change set `samcli-deploy1794139934` showed the same SHAPE (read-only description, 2026-11-08), but contains the v2 code and must not be reused.
+
+Expected:
+| Action | Resource | Why |
+|---|---|---|
+| Modify (Properties, no replacement) | `OnboardOSApiFunction` (`AWS::Lambda::Function`) | M1 + v3 API code |
+| Modify (Properties, no replacement) | `OnboardOSScenarioRunner` (`AWS::Lambda::Function`) | Code differs from the deployed runner because M1 added inert shared-contract schemas; suite and handler logic are unchanged |
+| Modify (Properties, no replacement) | `OnboardOSHttpApi` (`AWS::ApiGatewayV2::Api`) | The HTTP API definition gains the six coaching endpoints |
+| Add x6 | `OnboardOSApiFunctionApi{GetCoachingStudio,GetCoachingVersion,ListCoachingScenarios,PublishCoaching,SaveCoachingDraft,ValidateCoaching}Permission` (`AWS::Lambda::Permission`) | Lets API Gateway invoke the API function for the six new routes |
+| Modify (Properties), optional | `OnboardOSApiRole` (`AWS::IAM::Role`) | CloudFormation reports roles with dynamic references as a modification; the PROCESSED policy document and every other property must be unchanged. Verify by comparing the processed template's role with the deployed role, not by trusting the label. |
+
+Must NOT appear (stop and ask if any does):
+- any replacement (`Replacement` other than `False`), any Delete, or any Add other than the six Lambda permissions;
+- any change to DynamoDB tables or indexes (the data model is unchanged: coaching items live in the existing Core table);
+- any change to Cognito (pool, client, domain, users);
+- any change to the smoke function, parameters or outputs;
+- any IAM policy change beyond the no-op above: no new action, no wider resource, no `DeleteItem`, no new Bedrock permission or model;
+- a changed `CoworkerModelId` or model allow-list (a model change is a separate decision and a separate change set).
+
+Bundle evidence for the real change set: the API, runner and smoke bundle hashes of the commit being deployed, compared with `sam build` output at that commit. The deployed runner and API hashes will differ from them; that difference is expected and is exactly the Modify rows above.
+
+The frontend is a separate step and stays behind its build-time flags (`VITE_COACHING_STUDIO_ENABLED`, `VITE_COWORKER_ENABLED`).
+
+### Not verified on AWS
+No model was invoked for v3. The v3 evaluation has not run. `AI_UNVERIFIED` has never occurred against real output. The browser, Cognito, API Gateway and DynamoDB path with v3 is untested.
+
+## Coworker v3.1 (PREPARED LOCALLY, NOT DEPLOYED, NOT EVALUATED AGAINST A MODEL)
+
+Branch `feat/coworker-v3-1-grounding` (from `641dc95`). See `docs/ai-coworker-architecture.md` section 9. The unexecuted change set `samcli-deploy1794139934` still contains coworker-v2 and must not be executed; it was neither touched nor replaced.
+
+### Two comparisons (not to be confused)
+1. **Incremental, `641dc95` (v3) to v3.1:** API function code only. Runner and Smoke bundles are byte-identical (`614664d077dc`, `ddc0e860eeec`); the API bundle changes (`53d8c6e0878d` to `ab8d628500e2`). No change to `packages/contracts`, the web app, `infrastructure/template.yaml`, IAM, routes, parameters, tables or the model id. The only data-model change is an OPTIONAL `answerSource` attribute on chat turn items (read by this code, ignored by older code, not exposed to the browser).
+2. **Actual release, deployed `onboardos-dev` to M1 + v3.1:** unchanged by v3.1. The acceptance criteria written under "Coworker v3" above apply exactly: Modify API function, Modify ScenarioRunner (code differs from the deployed runner because of M1), Modify HTTP API (six coaching endpoints), Add six Lambda permissions, optionally the dynamic-reference `OnboardOSApiRole` modification with an unchanged processed policy; nothing else, and no replacement, deletion, table, Cognito or unauthorised IAM change.
+
+### Behavioural note for operators
+A bare follow-up with no earlier answer no longer calls Bedrock; it still consumes one turn of the session allowance and writes one chat turn item.
+
+### Not verified on AWS
+No model was invoked. `AI_UNVERIFIED` and the platform clarification have never run against real AWS, Cognito or DynamoDB.

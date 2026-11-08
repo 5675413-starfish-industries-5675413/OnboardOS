@@ -89,3 +89,25 @@ describe("Hosted UI URLs", () => {
     expect(url.searchParams.get("state")).toBe("a&client_id=evil");
   });
 });
+
+describe("coworkerEnabled feature flag (defaults OFF so a frontend deploy cannot outrun the API)", () => {
+  it("is OFF when the variable is unset or empty", () => {
+    vi.stubEnv("VITE_COWORKER_ENABLED", "");
+    expect(config.coworkerEnabled).toBe(false);
+  });
+
+  it.each(["false", "FALSE", "0", "1", "yes", "on", "enabled", "truee", "tru", " "])("is OFF for %j", (v) => {
+    vi.stubEnv("VITE_COWORKER_ENABLED", v);
+    expect(config.coworkerEnabled).toBe(false);
+  });
+
+  it.each(["true", "TRUE", "True", "  true  "])("is ON only for %j", (v) => {
+    vi.stubEnv("VITE_COWORKER_ENABLED", v);
+    expect(config.coworkerEnabled).toBe(true);
+  });
+
+  it("is not part of the required configuration (the app still starts without it)", () => {
+    vi.stubEnv("VITE_COWORKER_ENABLED", "");
+    expect(missingConfig()).toEqual([]);
+  });
+});

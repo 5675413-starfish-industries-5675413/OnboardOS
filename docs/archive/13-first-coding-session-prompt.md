@@ -1,3 +1,5 @@
+> **Archived on 2026-11-08.** This file is an early planning note. It is not a description of the running product. The current overview is [the project README](../../README.md). The implemented AWS resources are in `infrastructure/template.yaml`.
+
 # 13 — First coding-agent session prompt
 
 Copy this into Claude Code, Kiro, or your chosen coding agent **after cloning/creating the new OnboardOS repository**. The agent must inspect actual files and follow organizer rules rather than assuming infrastructure exists.

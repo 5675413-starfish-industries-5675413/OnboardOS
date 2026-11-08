@@ -1,67 +1,111 @@
-> **Architecture Freeze v1.1:** Before deploying any AWS service, read [the authoritative architecture](docs/14-architecture-freeze-v1.1.md) and [AWS service provisioning gates](docs/15-aws-provisioning-order.md). Earlier documentation is supporting context; where choices differ, v1.1 governs.
+# OnboardOS
 
-# OnboardOS — AWS Hackathon Build Pack
+Learn the job by doing the job.
 
-**Tagline:** Learn the job by doing the job.
+OnboardOS lets a new cloud engineer practice one realistic incident in a controlled workplace. The employee investigates, changes a service setting, and gets a deterministic AWS test result. A manager reviews the frozen evidence and makes the final call.
 
-**Status:** Planning / repository-ready specification. **This package is not a deployed or completed SaaS app.**
+## Overview
 
-OnboardOS is an enterprise workplace simulation platform. An organization configures training; a manager assigns practical work; an employee works across interconnected simulated tools, runs deterministic tests on AWS, and submits artifacts; a manager reviews evidence with Bedrock-assisted commentary.
+Most onboarding explains tools one at a time. The actual job mixes a ticket, a runbook, logs, a configuration change, and a written explanation.
 
-## Hackathon demo contract
+OnboardOS connects those steps. The incident content is synthetic. Sign-in, saved work, and test execution use AWS. A language model can coach from the local codebase, but it cannot mark a test passed and it cannot approve an employee.
 
-**Northstar Cloud** (fictional company) → **Junior Cloud Platform Engineer** → **INC-104** cloud-service incident.
+## What it does
 
-`Admin setup → Manager assignment → Employee investigation → Config revisions → AWS test runner → Evidence → Submission → Bedrock draft → Human review`.
+1. A manager assigns the published simulation.
+2. The employee reads the ticket, conversation, runbook, and synthetic diagnostics.
+3. The employee saves a configuration revision.
+4. A private Lambda runs the hidden checks for that revision.
+5. The employee submits a report, and that attempt's evidence is frozen.
+6. The manager approves the submission or requests a revision.
 
-This pack reorganizes the earlier JobOS architecture and renames it OnboardOS. It adds explicit release gates, secure boundaries, implementation priorities, and a Devpost draft.
+The example is **INC-104, Checkout API timeouts**: an old 800 ms timeout against a saved 1800 ms value. Employers cannot yet create new executable simulations. The local Manager Coaching Studio only edits coaching text for a scenario that already exists, and it is not on the public site.
 
-## Read in order
+## System architecture
 
-1. [Product and scope](docs/00-product-and-scope.md)
-2. [Architecture and AWS decisions](docs/01-architecture-and-aws.md)
-3. [Roles, permissions, and UI](docs/02-roles-and-ui.md)
-4. [Scenario engine and executable incident](docs/03-scenario-engine.md)
-5. [Data model and API](docs/04-data-and-api.md)
-6. [AI, evaluation, and evidence](docs/05-ai-and-evidence.md)
-7. [Implementation runbook and GitHub workflow](docs/06-build-and-git-workflow.md)
-8. [Verification and release criteria](docs/07-verification-and-release.md)
-9. [Devpost draft](docs/08-devpost-draft.md)
-10. [Enterprise roadmap](docs/09-enterprise-roadmap.md)
-11. [Backlog and milestones](docs/10-backlog.md)
-12. [Architecture decision record](docs/11-decisions.md)
-13. [Demo script](docs/12-demo-script.md)
-14. [Coding-agent rules](CLAUDE.md)
-15. [First coding-agent session prompt](docs/13-first-coding-session-prompt.md)
-16. [Landing page design brief](docs/16-landing-page-design-brief.md)
+```mermaid
+flowchart TD
+  manager[Manager]
+  employee[Employee]
+  ui[React and TypeScript frontend]
+  vercel[Vercel]
+  cognito[Amazon Cognito]
+  gateway[Amazon API Gateway]
+  api[API Lambda: authorization, scenario state, evidence]
+  db[(Amazon DynamoDB)]
+  runner[ScenarioRunner Lambda]
+  logs[Amazon CloudWatch Logs]
+  bedrock[Amazon Bedrock Nova Micro]
 
-## Important constraints
+  manager -->|Assign INC-104 and review a submission| ui
+  employee -->|Investigate, save a revision, and submit evidence| ui
+  ui --- vercel
+  ui -->|Authorization code with PKCE| cognito
+  cognito -->|JWT access token| ui
+  ui -->|Bearer token on application routes| gateway
+  gateway --> api
+  api -->|Membership, sessions, revisions, runs, and reviews| db
+  api -->|Invoke the hidden deterministic suite| runner
+  runner -->|Pass or fail for that config revision| api
+  api --> logs
+  runner --> logs
+  api -.->|Local coworker path, not in the public frontend| bedrock
+```
 
-- No real AWS employee data, private internal Amazon tools, unrestricted AWS IAM access, or production integrations in the demo.
-- User activity is captured **inside the authorized training product**; do not record unrelated desktop activity.
-- An LLM never sets test-pass status or managerial approval.
-- A passed test is valid for **only** the exact tested artifact revision and test-suite version.
-- Every request checks identity, tenant, role, resource ownership, and action permissions server-side.
-- Before making claims in Devpost, replace future tense with verified implemented behavior and document omissions.
-- **Naming risk:** at least one existing external company already operates under OnboardOS. Treat OnboardOS as a hackathon working name until commercial clearance.
+The browser talks only to Vercel, Cognito, and API Gateway. The API Lambda checks membership and ownership, applies the scenario reducer, and stores records in DynamoDB. ScenarioRunner has no database access. The dotted Bedrock arrow is the local coworker: the API builds the Nova Micro request and withholds a reply that contradicts session evidence. That UI is not deployed.
 
-## Required competition information
+| Service | Purpose | Status |
+| --- | --- | --- |
+| Amazon Cognito | Hosted sign-in with authorization code and PKCE. Application routes require a JWT. | Deployed / confirmed |
+| Amazon API Gateway | HTTP API. `GET /health` is public. Other routes use the JWT authorizer. | Deployed / confirmed |
+| AWS Lambda, API | Authorization, scenario state, submissions, and reviews. | Deployed / confirmed |
+| AWS Lambda, ScenarioRunner | Private deterministic INC-104 suite for one saved revision. | Unable to verify |
+| AWS Lambda, smoke function | Operator-only DynamoDB check. No public route. | Infrastructure-only |
+| Amazon DynamoDB | Membership, assignments, sessions, revisions, test runs, submissions, and reviews. | Unable to verify |
+| Amazon CloudWatch Logs | A log group for each Lambda function in the template. | Infrastructure-only |
+| AWS IAM | Separate roles for the API, runner, and smoke function. | Infrastructure-only |
+| Amazon Bedrock | Nova Micro through Converse, called only by the API for the coworker. | Implemented locally / not deployed |
 
-- AWS × A10 Hack 2026, November 7–8.
-- Team: 2–6 eligible members.
-- Submission deadline: November 8, 2026, 9:00 AM PST.
-- Devpost requires a Git repository URL and every teammate added to the project. A demo video/screenshots/logo are recommended.
-- Rules: https://a10-x-aws-hack-26.devpost.com/rules
-- Devpost: https://a10-x-aws-hack-26.devpost.com/
+Public app: [onboard-os-nine.vercel.app](https://onboard-os-nine.vercel.app). On 8 Nov 2026, `/health` returned 200 and anonymous `/v1/me` returned 401. That bundle has INC-104 and no coworker or Coaching Studio. Live table contents and a runner call were not rechecked. GitHub `main` is behind this branch.
 
-## Repo establishment
+## Technology stack
 
-Create a NEW GitHub repository named `onboardos-aws-hack-2026` when authorized to implement. Copy these planning docs into it, then scaffold TypeScript npm workspaces and implement the code in the order in the build runbook. **Do not claim these docs are an already-working repository.**
+- **Frontend:** React 19, TypeScript, Vite, React Router, hosted on Vercel.
+- **Backend:** TypeScript on Lambda, Zod contracts, API Gateway, Cognito, and DynamoDB.
+- **Simulation:** an in-process scenario reducer and a separate ScenarioRunner Lambda.
+- **AI:** Bedrock Converse with Nova Micro, local on this branch.
+- **Infrastructure:** AWS SAM / CloudFormation, IAM, and CloudWatch Logs.
 
-## Product maturity vocabulary
+## Running locally
 
-- **Planned:** documented only.
-- **Implemented locally:** source code works locally; evidence recorded.
-- **Deployed:** verified running against AWS resources.
-- **Demo-ready:** complete path proven against deployed resources and role boundaries.
-- **Enterprise-ready:** separate security, privacy, resilience, integration, accessibility, and commercial acceptance process (not a hackathon claim).
+Node.js 20+ and npm 10+ are required.
+
+```sh
+npm ci
+cp apps/web/.env.example apps/web/.env.local
+npm --workspace=apps/web run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173). Set `VITE_API_BASE_URL`, `VITE_COGNITO_CLIENT_ID`, `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_USER_POOL_ID`, and `VITE_AWS_REGION` from the stack outputs. Leave `VITE_COWORKER_ENABLED` and `VITE_COACHING_STUDIO_ENABLED` unset until those routes are deployed.
+
+```sh
+npm test
+npm run typecheck
+npm run verify
+```
+
+`npm run verify` includes `sam build`. It does not deploy.
+
+## Current scope
+
+Shipped work is one scenario, INC-104, with the manager and employee flow above. Coaching Studio and Coworker v3.1 are local, tested, and not deployed. v3.1 has not had a real-model evaluation. A Scenario Studio for employer-authored simulations is future work.
+
+## Repository
+
+[GitHub](https://github.com/5675413-starfish-industries-5675413/OnboardOS) · [Deployed frontend](https://onboard-os-nine.vercel.app)
+
+Also see [deployment](docs/aws-deployment.md), [scenario engine](docs/03-scenario-engine.md), [coworker design](docs/ai-coworker-architecture.md), [demo script](docs/12-demo-script.md), and [agent instructions](AGENTS.md).
+
+## Direction
+
+Review the local coworker and coaching editor before any deployment. Future scenario authoring must leave the hidden checks deterministic.

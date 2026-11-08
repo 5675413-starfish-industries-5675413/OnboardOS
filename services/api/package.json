@@ -2,11 +2,12 @@
   "name": "@onboardos/api",
   "version": "0.1.0",
   "private": true,
-  "description": "OnboardOS API Lambda \u2014 HTTP handler and internal smoke-test handler",
+  "description": "OnboardOS API Lambda — HTTP handler and internal smoke-test handler",
   "scripts": {
     "test": "vitest run --reporter=verbose"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "3.1164.0",
     "@aws-sdk/client-dynamodb": "3.1164.0",
     "@aws-sdk/client-lambda": "3.1164.0",
     "@aws-sdk/lib-dynamodb": "3.1164.0",
@@ -17,7 +18,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@types/aws-lambda": "8.10.164",
-    "@onboardos/test-runner": "*"
+    "@onboardos/test-runner": "*",
+    "@types/aws-lambda": "8.10.164"
   }
 }

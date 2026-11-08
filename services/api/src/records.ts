@@ -145,6 +145,15 @@ export function parseMember(item: unknown): Member | null {
 // Assignment
 // ---------------------------------------------------------------------------
 
+/** The immutable organization-published coaching version an assignment was created with. */
+export const CoachingRefSchema = z.strictObject({
+  source: z.literal("ORG_PUBLISHED"),
+  profileId: z.string().min(1).max(64),
+  profileVersion: z.number().int().positive(),
+  contentHash: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+});
+export type CoachingRef = z.infer<typeof CoachingRefSchema>;
+
 const AssignmentRecordSchema = z
   .looseObject({
     PK: z.string(),
@@ -166,6 +175,9 @@ const AssignmentRecordSchema = z
     // Phase 2D. Absent on records written before it: attempt 1, nothing submitted.
     attemptNumber: z.number().int().positive().default(1),
     latestSubmissionId: z.string().regex(SUBMISSION_ID_PATTERN).nullable().default(null),
+    // Milestone M1. Absent on every assignment created before it (and on any created while the organization had
+    // published no coaching): those use the platform's built-in coaching. Set once, at creation; never rewritten.
+    coachingRef: CoachingRefSchema.optional(),
     GSI1PK: z.string(),
     GSI1SK: z.string(),
     GSI2PK: z.string(),
@@ -195,6 +207,7 @@ export function buildAssignmentRecord(input: {
   employeeDisplayName: string;
   assignedBySub: string;
   now: string;
+  coachingRef?: CoachingRef | null;
 }): AssignmentRecord {
   const { assignmentId, organizationId, scenario, employeeSub, employeeDisplayName, assignedBySub, now } = input;
   return {
@@ -215,6 +228,7 @@ export function buildAssignmentRecord(input: {
     updatedAt: now,
     attemptNumber: 1,
     latestSubmissionId: null,
+    ...(input.coachingRef ? { coachingRef: input.coachingRef } : {}),
     GSI1PK: keys.employeeIndex(organizationId, employeeSub),
     GSI1SK: `ASSIGN#${now}#${assignmentId}`,
     GSI2PK: keys.managerIndex(organizationId, assignedBySub),
@@ -241,7 +255,12 @@ export function toAssignmentView(r: AssignmentRecord, includeEmployee: boolean):
     attemptNumber: r.attemptNumber,
     latestSubmissionId: r.latestSubmissionId,
     ...(includeEmployee
-      ? { employee: { userSub: r.employeeSub, displayName: r.employeeDisplayName } }
+      ? {
+          employee: { userSub: r.employeeSub, displayName: r.employeeDisplayName },
+          coaching: r.coachingRef
+            ? { source: "ORG_PUBLISHED" as const, profileVersion: r.coachingRef.profileVersion }
+            : { source: "BUILT_IN" as const, profileVersion: null },
+        }
       : {}),
   });
 }

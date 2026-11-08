@@ -29,6 +29,8 @@ import {
   type ReportDraft,
   type Tab,
 } from "../lib/views.js";
+import { config } from "../lib/config.js";
+import { CoworkerPanel } from "../views/CoworkerPanel.js";
 
 /** How often a PENDING run is re-read from the server. */
 const POLL_MS = 2000;
@@ -349,6 +351,10 @@ export function SessionPage() {
         canRun={canRunTests(session, busy || running || submitting)}
         onRun={() => void onRunTests()}
       />
+
+      {config.coworkerEnabled && (
+        <CoworkerPanel sessionId={session.sessionId} phase={session.phase} onAuthExpired={handleAuth} />
+      )}
 
       {session.phase === "INVESTIGATING" ? (
         <ReportCard

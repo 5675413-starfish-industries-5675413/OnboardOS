@@ -30,7 +30,7 @@ export default defineConfig({
       "**/.aws-sam/**",
     ],
     include: [
-      "**/src/**/*.test.ts",
+      "**/src/**/*.test.{ts,tsx}",
       // Operator tooling (provisioning script logic), tested with fake AWS clients
       "scripts/**/*.test.ts",
       // Infrastructure invariants asserted against infrastructure/template.yaml

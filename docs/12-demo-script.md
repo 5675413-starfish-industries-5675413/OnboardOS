@@ -1,3 +1,5 @@
+> **Live-demo note (2026-11-08).** The public site is an earlier deployment. It can show assignment, investigation, Lambda test results, submission, and manager review. It does not include the Bedrock review draft or the AI coworker. Do not present those as part of the live walkthrough.
+
 # 12 — Demonstration script and judge questions
 
 ## One sentence
